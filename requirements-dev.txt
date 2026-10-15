@@ -1,0 +1,4 @@
+-r requirements.txt
+mypy>=1.15,<3
+pyright>=1.1.400,<2
+types-requests>=2.32,<3
