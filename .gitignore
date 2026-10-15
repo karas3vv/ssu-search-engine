@@ -1,0 +1,47 @@
+# собранные статьи, базы и поисковые индексы
+/data/
+/qdrant_storage/
+/models/
+/embeddings/
+*.jsonl
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+*.pkl
+*.pickle
+
+# окружения и кеши python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# локальные настройки и секреты
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# журналы и временные файлы
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# настройки редакторов и системы
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
