@@ -1,0 +1,179 @@
+"""проверяем доступ к удалённой модели и получаем эмбеддинги через api mws."""
+from __future__ import annotations
+
+import argparse
+import getpass
+import math
+import os
+import sys
+from contextlib import closing
+from dataclasses import dataclass, field
+from typing import cast
+from urllib.parse import urlsplit
+
+import requests
+
+DEFAULT_URL: str = 'https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings'
+DEFAULT_MODEL: str = 'parser'  # имя деплоймента в mws, а не имя модели на hugging face
+
+
+class EmbeddingAPIError(RuntimeError):
+    """ошибка подключения или некорректный ответ сервера."""
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    api_key: str = field(repr=False)  # ключ не выводится при печати настроек
+    url: str = DEFAULT_URL
+    model: str = DEFAULT_MODEL
+    timeout_seconds: float = 120.0
+
+    def __post_init__(self) -> None:
+        if not self.api_key.strip():
+            raise ValueError('api-ключ не указан')
+        parsed = urlsplit(self.url)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username
+                or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError('нужен https-адрес embeddings без пароля, параметров и фрагмента')
+        if not self.model.strip():
+            raise ValueError('имя деплоймента не указано')
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError('тайм-аут должен быть положительным конечным числом')
+
+    @classmethod
+    def from_env(cls, api_key: str) -> EmbeddingConfig:
+        return cls(
+            api_key=api_key,
+            url=os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
+            model=os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL),
+        )
+
+
+def json_object(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise EmbeddingAPIError(f'{name}: ожидался объект json')
+    return cast(dict[str, object], value)
+
+
+def parse_vectors(payload: object, expected_count: int) -> list[list[float]]:
+    """проверяем ответ и восстанавливаем порядок векторов по полю index."""
+    root = json_object(payload, 'ответ')
+    value = root.get('data')
+    if not isinstance(value, list):
+        raise EmbeddingAPIError('в ответе нет списка data')
+    items = cast(list[object], value)
+    if len(items) != expected_count:
+        raise EmbeddingAPIError('число векторов не совпадает с числом отправленных текстов')
+    vectors: dict[int, list[float]] = {}
+    dimension: int | None = None
+    for item in items:
+        record = json_object(item, 'элемент data')
+        index = record.get('index')
+        if type(index) is not int or not 0 <= index < expected_count or index in vectors:
+            raise EmbeddingAPIError('неверный или повторяющийся index в ответе')
+        raw_vector = record.get('embedding')
+        if not isinstance(raw_vector, list) or not raw_vector:
+            raise EmbeddingAPIError('embedding должен быть непустым списком чисел')
+        vector: list[float] = []
+        for coordinate in cast(list[object], raw_vector):
+            if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+                raise EmbeddingAPIError('embedding содержит нечисловое значение')
+            try:
+                number = float(coordinate)
+            except OverflowError as exc:
+                raise EmbeddingAPIError('embedding содержит слишком большое число') from exc
+            if not math.isfinite(number):
+                raise EmbeddingAPIError('embedding содержит nan или бесконечность')
+            vector.append(number)
+        if not any(vector):
+            raise EmbeddingAPIError('сервер вернул нулевой вектор')
+        if dimension is None:
+            dimension = len(vector)
+        elif len(vector) != dimension:
+            raise EmbeddingAPIError('размерности векторов в ответе различаются')
+        vectors[index] = vector
+    return [vectors[index] for index in range(expected_count)]
+
+
+class EmbeddingsClient:
+    def __init__(self, config: EmbeddingConfig) -> None:
+        self.config: EmbeddingConfig = config
+        self.session: requests.Session = requests.Session()
+
+    def close(self) -> None:
+        self.session.close()
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        # формат входных строк задаётся вызывающим кодом: клиент не добавляет префиксы e5
+        if not texts or any(not text.strip() for text in texts):
+            raise ValueError('нужен непустой список непустых текстов')
+        try:
+            response = self.session.post(
+                self.config.url,
+                headers={
+                    'Authorization': f'Bearer {self.config.api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json={'model': self.config.model, 'input': texts},
+                timeout=(10, self.config.timeout_seconds),
+                allow_redirects=False,
+            )
+        except requests.Timeout:
+            raise EmbeddingAPIError('сервер не ответил вовремя; запрос автоматически не повторяется') from None
+        except requests.RequestException:
+            # исходное исключение и тело ответа могут содержать лишние служебные данные
+            raise EmbeddingAPIError('не удалось подключиться к api; проверьте сеть и адрес сервера') from None
+        with response:
+            status = response.status_code
+            if not 200 <= status < 300:
+                explanations: dict[int, str] = {
+                    400: 'проверьте формат запроса и ограничения модели',
+                    401: 'проверьте api-ключ сервисного аккаунта',
+                    403: 'проверьте доступ к проекту и роль gpt.inferencer',
+                    404: 'проверьте адрес проекта и имя деплоймента',
+                    429: 'превышена квота или частота запросов; повторите позже',
+                }
+                explanation = explanations.get(status, 'ошибка сервера или неожиданный ответ')
+                raise EmbeddingAPIError(f'http {status}: {explanation}')
+            try:
+                payload: object = response.json()
+            except ValueError:
+                raise EmbeddingAPIError('сервер вернул ответ не в формате json') from None
+            return parse_vectors(payload, len(texts))
+
+
+class CliArgs(argparse.Namespace):
+    text: str
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--text', default='Привет, как дела?', help='один текст для проверки api')
+    args: CliArgs = parser.parse_args(namespace=CliArgs())
+    if not args.text.strip():
+        parser.error('текст не должен быть пустым')
+    # ключ можно заранее задать через окружение или ввести без отображения в терминале
+    api_key = os.environ.get('MWS_API_KEY', '').strip()
+    if not api_key:
+        if not sys.stdin.isatty():
+            parser.exit(1, 'задайте MWS_API_KEY или запустите команду в интерактивном терминале\n')
+        try:
+            api_key = getpass.getpass('api-ключ сервисного аккаунта mws: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, '\nввод ключа отменён\n')
+    try:
+        config = EmbeddingConfig.from_env(api_key)
+        with closing(EmbeddingsClient(config)) as client:
+            vector = client.embed([args.text])[0]
+    except (ValueError, EmbeddingAPIError) as exc:
+        parser.exit(1, f'не удалось получить эмбеддинг: {exc}\n')
+    print('подключение к api работает')
+    print(f'деплоймент: {config.model}')
+    print(f'размерность вектора: {len(vector)}')
+    print(f'первые 5 координат: {vector[:5]}')
+    print('корпус статей не читался и не изменялся')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
