@@ -16,25 +16,25 @@ from uuid import NAMESPACE_URL, uuid5
 
 import requests
 from tokenizers import Tokenizer
+from tokenizers.processors import TemplateProcessing
 
 from prepare import DEFAULT_SOURCE, PreparationStats, PreparedArticle, iter_prepared_articles
 
 # фиксируем версию, чтобы одинаковые настройки всегда давали одинаковые фрагменты
-MODEL_ID: str = 'intfloat/multilingual-e5-small'
-MODEL_REVISION: str = '614241f622f53c4eeff9890bdc4f31cfecc418b3'
-MODEL_MAX_TOKENS: int = 512
-CHUNKING_VERSION: str = '1'
-PASSAGE_PREFIX: str = 'passage: '
+MODEL_ID: str = 'BAAI/bge-multilingual-gemma2'
+MODEL_REVISION: str = '8365500e19bc804136f4ad12c2494430239a2d72'
+MODEL_MAX_TOKENS: int = 8192  # предел модели; у удалённого деплоймента лимит может быть ниже
+CHUNKING_VERSION: str = '2'
 DEFAULT_TOKENIZER: Path = (
     Path(__file__).resolve().parent / 'models' / MODEL_ID / MODEL_REVISION / 'tokenizer.json'
 )
 
 
-# настройки относятся ко всему входу модели: префиксу, заголовку и фрагменту
+# настройки относятся ко всему входу модели: заголовку, фрагменту и специальным токенам
 @dataclass(frozen=True)
 class ChunkingConfig:
-    max_tokens: int = 384  # верхняя граница с учётом специальных токенов
-    overlap_tokens: int = 48  # повторяем конец предыдущего фрагмента для связности
+    max_tokens: int = 1024  # верхняя граница с учётом специальных токенов
+    overlap_tokens: int = 128  # повторяем конец предыдущего фрагмента для связности
 
     def __post_init__(self) -> None:
         if not 64 <= self.max_tokens <= MODEL_MAX_TOKENS:
@@ -69,6 +69,14 @@ class TextTokenizer(Protocol):
 class ModelTokenizer:
     def __init__(self, path: Path) -> None:
         self.tokenizer: Tokenizer = Tokenizer.from_file(str(path))
+        # отклоняем старый кеш e5 и файлы с несовместимыми специальными токенами
+        if self.tokenizer.token_to_id('<bos>') != 2 or self.tokenizer.token_to_id('<eos>') != 1:
+            raise ValueError('нужен tokenizer.json модели bge-multilingual-gemma2')
+        # настройки gemma требуют bos и eos; учитываем оба при подсчёте длины
+        self.tokenizer.post_processor = TemplateProcessing(
+            single='<bos> $A <eos>',
+            special_tokens=[('<bos>', 2), ('<eos>', 1)],
+        )
         # запрещаем скрытое обрезание входа и добавление пустых токенов
         self.tokenizer.no_truncation()
         self.tokenizer.no_padding()
@@ -109,7 +117,8 @@ def embedding_header(title: str, tokenizer: TextTokenizer, max_tokens: int) -> s
     title_limit = min(64, max_tokens // 4)
     if len(offsets) > title_limit:
         title = title[:offsets[title_limit][0]].rstrip()
-    return PASSAGE_PREFIX + title + '\n\n'
+    # документы gemma получают обычный текст без префикса passage из e5
+    return title + '\n\n'
 
 
 def chunk_article(
@@ -184,8 +193,8 @@ def main() -> int:
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='база исходных статей')
     parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER, help='путь к локальному токенизатору')
     parser.add_argument('--limit', type=int, default=5, help='сколько статей проверить')
-    parser.add_argument('--max-tokens', type=int, default=384, help='лимит входа модели вместе с заголовком')
-    parser.add_argument('--overlap-tokens', type=int, default=48, help='перекрытие соседних фрагментов')
+    parser.add_argument('--max-tokens', type=int, default=1024, help='лимит входа модели вместе с заголовком')
+    parser.add_argument('--overlap-tokens', type=int, default=128, help='перекрытие соседних фрагментов')
     parser.add_argument('--preview', type=int, default=2, help='сколько примеров вывести')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.limit < 1 or args.preview < 0:

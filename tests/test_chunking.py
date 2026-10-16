@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from chunking import ChunkingConfig, chunk_article
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+
+from chunking import ChunkingConfig, ModelTokenizer, chunk_article
 from prepare import PreparedArticle
 
 
@@ -48,7 +53,7 @@ class ChunkingTests(unittest.TestCase):
         chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].text, doc.text)
-        self.assertTrue(chunks[0].embedding_text.startswith('passage: заголовок\n\n'))
+        self.assertTrue(chunks[0].embedding_text.startswith('заголовок\n\n'))
 
     def test_prefers_line_boundary(self) -> None:
         doc = article('а' * 45 + '\n' + 'б' * 30 + '\n' + 'в' * 200)
@@ -77,8 +82,34 @@ class ChunkingTests(unittest.TestCase):
         chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(128, 0)))
         self.assertEqual(''.join(chunk.text for chunk in chunks), doc.text)
 
+    def test_gemma_chunks_can_exceed_old_e5_limit(self) -> None:
+        doc = article('длинный текст ' * 200)
+        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
+        self.assertTrue(any(chunk.token_count > 512 for chunk in chunks))
+        self.assertTrue(all(chunk.token_count <= 1024 for chunk in chunks))
+        self.assertTrue(all(not chunk.embedding_text.startswith('passage: ') for chunk in chunks))
+
+    def test_tokenizer_counts_bos_and_eos(self) -> None:
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / 'tokenizer.json'
+            tokenizer = Tokenizer(WordLevel(
+                {'<unk>': 0, '<eos>': 1, '<bos>': 2, 'текст': 3}, unk_token='<unk>',
+            ))
+            tokenizer.save(str(path))
+            actual = ModelTokenizer(path)
+            self.assertEqual(actual.tokenizer.encode('текст').ids, [2, 3, 1])
+            self.assertEqual(actual.count('текст'), 3)
+
+    def test_incompatible_tokenizer_is_rejected(self) -> None:
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / 'tokenizer.json'
+            tokenizer = Tokenizer(WordLevel({'[UNK]': 0}, unk_token='[UNK]'))
+            tokenizer.save(str(path))
+            with self.assertRaisesRegex(ValueError, 'bge-multilingual-gemma2'):
+                ModelTokenizer(path)
+
     def test_invalid_config_is_rejected(self) -> None:
-        for max_tokens, overlap in [(513, 10), (63, 10), (128, -1), (128, 64)]:
+        for max_tokens, overlap in [(8193, 10), (63, 10), (128, -1), (128, 64)]:
             with self.subTest(max_tokens=max_tokens, overlap=overlap):
                 with self.assertRaises(ValueError):
                     ChunkingConfig(max_tokens, overlap)
