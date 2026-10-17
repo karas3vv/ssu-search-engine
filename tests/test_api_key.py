@@ -1,0 +1,34 @@
+"""проверяем общий ввод ключа без настоящих секретов."""
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+from embeddings import read_api_key
+
+
+class ApiKeyTests(unittest.TestCase):
+    def test_environment_key_does_not_prompt(self) -> None:
+        with patch.dict('os.environ', {'MWS_API_KEY': ' test-key-not-real '}, clear=True):
+            with patch('embeddings.getpass.getpass') as prompt:
+                self.assertEqual(read_api_key(), 'test-key-not-real')
+                prompt.assert_not_called()
+
+    def test_empty_key_is_rejected(self) -> None:
+        with patch.dict('os.environ', {}, clear=True):
+            with patch('embeddings.sys.stdin.isatty', return_value=True):
+                with patch('embeddings.getpass.getpass', return_value=' '):
+                    with self.assertRaises(ValueError):
+                        read_api_key()
+
+    def test_noninteractive_missing_key_fails_without_prompt(self) -> None:
+        with patch.dict('os.environ', {}, clear=True):
+            with patch('embeddings.sys.stdin.isatty', return_value=False):
+                with patch('embeddings.getpass.getpass') as prompt:
+                    with self.assertRaises(ValueError):
+                        read_api_key()
+                    prompt.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

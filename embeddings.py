@@ -146,21 +146,32 @@ class CliArgs(argparse.Namespace):
     text: str
 
 
+def read_api_key() -> str:
+    """получаем ключ из окружения или скрытого ввода для всех команд проекта."""
+    api_key = os.environ.get('MWS_API_KEY', '').strip()
+    if api_key:
+        return api_key
+    if not sys.stdin.isatty():
+        raise ValueError('задайте MWS_API_KEY или запустите команду в интерактивном терминале')
+    try:
+        api_key = getpass.getpass('api-ключ сервисного аккаунта mws: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        raise ValueError('ввод ключа отменён') from None
+    if not api_key:
+        raise ValueError('api-ключ не указан')
+    return api_key
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--text', default='Привет, как дела?', help='один текст для проверки api')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not args.text.strip():
         parser.error('текст не должен быть пустым')
-    # ключ можно заранее задать через окружение или ввести без отображения в терминале
-    api_key = os.environ.get('MWS_API_KEY', '').strip()
-    if not api_key:
-        if not sys.stdin.isatty():
-            parser.exit(1, 'задайте MWS_API_KEY или запустите команду в интерактивном терминале\n')
-        try:
-            api_key = getpass.getpass('api-ключ сервисного аккаунта mws: ').strip()
-        except (EOFError, KeyboardInterrupt):
-            parser.exit(1, '\nввод ключа отменён\n')
+    try:
+        api_key = read_api_key()
+    except ValueError as exc:
+        parser.exit(1, f'{exc}\n')
     try:
         config = EmbeddingConfig.from_env(api_key)
         with closing(EmbeddingsClient(config)) as client:
