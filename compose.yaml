@@ -1,0 +1,17 @@
+name: habr-search
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    ports:
+      # база доступна только с этого компьютера
+      - "127.0.0.1:6333:6333"
+    volumes:
+      # данные сохраняются после остановки и пересоздания контейнера
+      - qdrant_storage:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+
+volumes:
+  qdrant_storage:
+  qdrant_snapshots:
