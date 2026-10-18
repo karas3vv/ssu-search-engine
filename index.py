@@ -1,4 +1,4 @@
-"""индексируем фрагменты через mws и сохраняем их в локальный qdrant."""
+"""индексируем фрагменты через mws и сохраняем их в qdrant."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from chunking import (
     CHUNKING_VERSION, DEFAULT_TOKENIZER, MODEL_ID, MODEL_REVISION,
@@ -22,9 +23,9 @@ from embeddings import (
     DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key,
 )
 from prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
+from vector_store import connect_store, resolve_qdrant_config
 
 VECTOR_SIZE: int = 3584  # размерность, которую вернул проверенный деплоймент parser
-DEFAULT_QDRANT_PATH: Path = Path(__file__).resolve().parent / 'data' / 'qdrant'
 
 
 # интерфейс позволяет проверять запись в qdrant без настоящих запросов в mws
@@ -50,17 +51,23 @@ def collection_name(url: str, deployment: str, config: ChunkingConfig) -> str:
     return f'habr_gemma2_{signature}'
 
 
-def ensure_collection(store: QdrantClient, name: str, vector_size: int = VECTOR_SIZE) -> None:
+def ensure_collection(
+    store: QdrantClient, name: str, vector_size: int = VECTOR_SIZE,
+    *, create_article_index: bool = False,
+) -> None:
     if not store.collection_exists(name):
         store.create_collection(
             collection_name=name,
             vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
         )
-        return
-    vectors = store.get_collection(name).config.params.vectors
+    info = store.get_collection(name)
+    vectors = info.config.params.vectors
     if (not isinstance(vectors, models.VectorParams) or vectors.size != vector_size
             or vectors.distance != models.Distance.COSINE):
         raise ValueError('существующая коллекция имеет другую размерность или метрику')
+    # сервер использует индекс поля для фильтрации и удаления старых фрагментов статьи
+    if create_article_index and 'article_id' not in info.payload_schema:
+        store.create_payload_index(name, 'article_id', models.PayloadSchemaType.INTEGER, wait=True)
 
 
 def index_chunks(
@@ -122,7 +129,8 @@ def index_chunks(
 class CliArgs(argparse.Namespace):
     source: Path
     tokenizer_file: Path
-    qdrant_path: Path
+    qdrant_path: Path | None
+    qdrant_url: str | None
     limit: int
     batch_size: int
     max_tokens: int
@@ -134,7 +142,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
     parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
-    parser.add_argument('--qdrant-path', type=Path, default=DEFAULT_QDRANT_PATH)
+    location = parser.add_mutually_exclusive_group()
+    location.add_argument('--qdrant-path', type=Path, help='папка встроенного режима')
+    location.add_argument('--qdrant-url', help='адрес сервера, например http://127.0.0.1:6333')
     parser.add_argument('--limit', type=int, default=5, help='общий лимит статей, включая уже обработанные')
     parser.add_argument('--batch-size', type=int, default=4, help='число фрагментов в одном запросе mws')
     parser.add_argument('--max-tokens', type=int, default=1024)
@@ -147,6 +157,7 @@ def main() -> int:
         parser.error(f'исходная база не найдена: {args.source}')
     try:
         config = ChunkingConfig(args.max_tokens, args.overlap_tokens)
+        store_config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         tokenizer = load_tokenizer(args.tokenizer_file)
         url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
         deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
@@ -160,12 +171,12 @@ def main() -> int:
             store: QdrantClient | None = None
             embeddings: EmbeddingsClient | None = None
             if not args.dry_run:
+                # проверяем qdrant до запроса ключа и платных обращений в mws
+                store = connect_store(store_config)
+                stack.callback(store.close)
+                ensure_collection(store, name, create_article_index=store_config.url is not None)
                 key = read_api_key()
                 embeddings = stack.enter_context(closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))))
-                # локальный режим хранит индекс на диске и не требует отдельного сервера
-                store = QdrantClient(path=str(args.qdrant_path))
-                stack.callback(store.close)
-                ensure_collection(store, name)
             for article in islice(prepared, args.limit):
                 chunks = list(chunk_article(article, tokenizer, config))
                 chunk_count += len(chunks)
@@ -180,11 +191,15 @@ def main() -> int:
         if args.dry_run:
             print('пробный запуск: api не вызывался, индекс не создавался')
         else:
-            print(f'локальный индекс: {args.qdrant_path}')
+            print(f'qdrant: {store_config.url or store_config.path}')
         return 0 if article_count and not prepared_stats.rejected else 1
     except KeyboardInterrupt:
         print('\nостановлено; сохранённые пакеты останутся в qdrant, повторите ту же команду для продолжения')
         return 130
+    except UnexpectedResponse as exc:
+        parser.exit(1, f'qdrant вернул http {exc.status_code}; проверьте адрес, ключ и настройки сервера\n')
+    except ResponseHandlingException:
+        parser.exit(1, 'не удалось связаться с qdrant; проверьте адрес и запущен ли контейнер\n')
     except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
         parser.exit(1, f'индексация остановлена: {exc}\nсохранённые пакеты можно использовать при следующем запуске\n')
 

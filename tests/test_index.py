@@ -120,7 +120,7 @@ class IndexTests(unittest.TestCase):
             with (patch('sys.argv', argv),
                   patch('index.load_tokenizer', return_value=CharacterTokenizer()),
                   patch('index.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                  patch('index.QdrantClient', side_effect=AssertionError('qdrant не нужен')),
+                  patch('index.connect_store', side_effect=AssertionError('qdrant не нужен')),
                   redirect_stdout(io.StringIO())):
                 self.assertEqual(main(), 0)
             self.assertEqual(before, source.read_bytes())
