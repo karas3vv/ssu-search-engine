@@ -1,0 +1,153 @@
+"""ищем статьи по смыслу запроса через gemma в mws и qdrant."""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
+
+from chunking import DEFAULT_TOKENIZER, ChunkingConfig, load_tokenizer
+from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
+from index import VECTOR_SIZE, collection_name
+from vector_store import connect_store, resolve_qdrant_config
+
+QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages that answer the query.'
+MAX_QUERY_TOKENS: int = 1024
+
+
+# результат представляет статью с её лучшим фрагментом
+@dataclass(frozen=True)
+class SearchResult:
+    article_id: int
+    title: str
+    url: str
+    text: str
+    score: float  # косинусное сходство, а не вероятность правильного ответа
+
+
+def build_query(query: str, raw: bool = False) -> str:
+    """добавляем поисковую инструкцию gemma; документы индексируются без неё."""
+    query = query.strip()
+    if not query:
+        raise ValueError('поисковый запрос пуст')
+    if raw:
+        return query
+    return f'<instruct>{QUERY_INSTRUCTION}\n<query>{query}'
+
+
+def validate_collection(store: QdrantClient, name: str, vector_size: int = VECTOR_SIZE) -> None:
+    # поиск не создаёт и не изменяет коллекцию
+    if not store.collection_exists(name):
+        raise ValueError(f'коллекция {name} не найдена; проверьте адрес qdrant и настройки индексации')
+    vectors = store.get_collection(name).config.params.vectors
+    if (not isinstance(vectors, models.VectorParams) or vectors.size != vector_size
+            or vectors.distance != models.Distance.COSINE):
+        raise ValueError('коллекция использует другую размерность или метрику')
+    if store.count(name, exact=True).count == 0:
+        raise ValueError('коллекция пуста; сначала проиндексируйте статьи')
+
+
+def search_articles(
+    store: QdrantClient, name: str, vector: list[float], top_k: int = 5,
+    vector_size: int = VECTOR_SIZE,
+) -> list[SearchResult]:
+    if top_k < 1:
+        raise ValueError('top-k должен быть положительным')
+    if len(vector) != vector_size or not all(math.isfinite(value) for value in vector) or not any(vector):
+        raise ValueError(f'нужен ненулевой конечный вектор размерности {vector_size}')
+    # группируем на стороне qdrant: одна статья занимает только одну строку выдачи
+    response = store.query_points_groups(
+        collection_name=name, query=vector, group_by='article_id', group_size=1,
+        limit=top_k, with_payload=['article_id', 'title', 'url', 'text'], with_vectors=False,
+    )
+    results: list[SearchResult] = []
+    for group in response.groups:
+        if not group.hits:
+            continue
+        hit = group.hits[0]
+        payload = hit.payload or {}
+        article_id: object = payload.get('article_id')
+        title: object = payload.get('title')
+        url: object = payload.get('url')
+        text: object = payload.get('text')
+        if (type(article_id) is not int or article_id < 1 or not isinstance(title, str)
+                or not isinstance(url, str) or not isinstance(text, str)):
+            raise ValueError('в найденной точке отсутствуют метаданные статьи; проверьте индекс')
+        results.append(SearchResult(article_id, title, url, text, float(hit.score)))
+    return results
+
+
+class CliArgs(argparse.Namespace):
+    query: str
+    qdrant_url: str | None
+    qdrant_path: Path | None
+    tokenizer_file: Path
+    top_k: int
+    max_tokens: int
+    overlap_tokens: int
+    snippet_chars: int
+    raw_query: bool
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--query', required=True, help='поисковый запрос')
+    location = parser.add_mutually_exclusive_group()
+    location.add_argument('--qdrant-url', help='адрес сервера qdrant')
+    location.add_argument('--qdrant-path', type=Path, help='папка встроенного qdrant')
+    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
+    parser.add_argument('--top-k', type=int, default=5, help='сколько разных статей показать')
+    parser.add_argument('--max-tokens', type=int, default=1024, help='должно совпадать с настройкой индексатора')
+    parser.add_argument('--overlap-tokens', type=int, default=128, help='должно совпадать с настройкой индексатора')
+    parser.add_argument('--snippet-chars', type=int, default=400, help='длина отрывка в выводе')
+    parser.add_argument('--raw-query', action='store_true', help='для сервера, который сам добавляет инструкцию gemma')
+    args: CliArgs = parser.parse_args(namespace=CliArgs())
+    if args.top_k < 1 or args.snippet_chars < 1:
+        parser.error('top-k и snippet-chars должны быть положительными')
+    try:
+        query = build_query(args.query, args.raw_query)
+        chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
+        config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
+        if config.path is not None and not config.path.is_dir():
+            raise ValueError('локальное хранилище не найдено; укажите адрес сервера через --qdrant-url')
+        url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
+        deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
+        name = collection_name(url, deployment, chunking)
+        with closing(connect_store(config)) as store:
+            # проверяем индекс до запроса ключа и обращения в платный api
+            validate_collection(store, name)
+            tokenizer = load_tokenizer(args.tokenizer_file)
+            if tokenizer.count(query) > MAX_QUERY_TOKENS:
+                raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов; сократите его')
+            key = read_api_key()
+            with closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))) as embeddings:
+                vector = embeddings.embed([query])[0]
+            results = search_articles(store, name, vector, args.top_k)
+        print(f'коллекция: {name}')
+        print(f'найдено статей: {len(results)}')
+        for number, result in enumerate(results, 1):
+            print(f'\n{number}. {result.title}')
+            print(f'сходство: {result.score:.4f}')
+            print(result.url)
+            # сокращаем только отображение, исходный текст в индексе не меняется
+            snippet = ' '.join(result.text.split())
+            print(snippet[:args.snippet_chars] + ('…' if len(snippet) > args.snippet_chars else ''))
+        return 0
+    except KeyboardInterrupt:
+        print('\nпоиск остановлен')
+        return 130
+    except UnexpectedResponse as exc:
+        parser.exit(1, f'qdrant вернул http {exc.status_code}; проверьте настройки сервера\n')
+    except ResponseHandlingException:
+        parser.exit(1, 'не удалось связаться с qdrant; проверьте адрес и запущен ли контейнер\n')
+    except (ValueError, RuntimeError, OSError) as exc:
+        parser.exit(1, f'поиск не выполнен: {exc}\n')
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -10,6 +10,7 @@ from uuid import uuid4
 from chunking import ChunkingConfig, chunk_article
 from index import ensure_collection, index_chunks
 from prepare import PreparedArticle
+from search import search_articles, validate_collection
 from vector_store import QdrantConfig, connect_store
 
 TEST_URL: str | None = os.environ.get('QDRANT_TEST_URL')
@@ -55,7 +56,10 @@ class QdrantServerTests(unittest.TestCase):
                 repeated = index_chunks(chunks, doc.text_hash, store, name, backend, 2, 3)
                 self.assertEqual(repeated.skipped, len(chunks))
                 self.assertEqual(backend.calls, previous_calls)
-                self.assertTrue(store.query_points(name, query=[1.0, 1.0, 1.0], limit=3).points)
+                validate_collection(store, name, 3)
+                results = search_articles(store, name, [1.0, 1.0, 1.0], 3, 3)
+                self.assertEqual([result.article_id for result in results], [1])
+                self.assertEqual(results[0].title, doc.title)
                 # имитируем новую версию статьи с меньшим числом фрагментов
                 index_chunks(chunks[:1], doc.text_hash, store, name, backend, 2, 3)
                 self.assertEqual(store.count(name, exact=True).count, 1)
