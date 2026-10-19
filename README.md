@@ -17,6 +17,9 @@
 | `search.py` | семантический поиск по вектору пользовательского запроса |
 | `spelling.py` | словарь, символьные триграммы и подбор исправлений опечаток |
 | `spellcheck.py` | построение словаря, проверка фразы и подготовка исправленного набора запросов |
+| `evaluate_spelling.py` | локальная оценка исправлений и сравнение двух сохранённых выдач |
+| `web.py` | локальный API и запуск страницы поиска |
+| `static/` | страница, стили и поведение интерфейса без сборки |
 | `evaluate.py` | проверка семантического поиска, метрики и продолжение частичного отчёта |
 | `tests/test_api_key.py` | проверки получения и скрытого ввода ключа |
 | `tests/test_chunking.py` | проверки границ фрагментов, лимитов и стабильности id |
@@ -26,6 +29,8 @@
 | `tests/test_qdrant_server.py` | необязательная проверка временной коллекции на настоящем сервере |
 | `tests/test_search.py` | проверки выдачи разных статей и обработки неправильного индекса |
 | `tests/test_spelling.py` | проверки опечаток, защиты терминов, словаря и режимов поиска |
+| `tests/test_evaluate_spelling.py` | проверки эталонов, отчётов и сравнения исходных и исправленных запросов |
+| `tests/test_web.py` | проверки HTTP, ошибок и отсутствия лишних обращений к модели |
 | `tests/test_evaluate.py` | проверки разметки, метрик, отчётов и продолжения после сбоя |
 | `evaluation/queries.csv` | стартовые 18 запросов и известные подходящие статьи |
 | `evaluation/queries_dev.csv` | 32 запроса для настройки на расширенном индексе |
@@ -33,6 +38,9 @@
 | `evaluation/EXPANDED.md` | расширение до 500 статей и основания новой разметки |
 | `evaluation/README.md` | формат разметки, запуск оценки и значения метрик |
 | `evaluation/SPELLING.md` | устройство опечаточника, режимы поиска и сравнение качества |
+| `evaluation/spelling_queries.csv` | 20 запросов с опечатками и 10 правильных с эталонами |
+| `evaluation/SPELLING_BENCHMARK.md` | локальные метрики опечаточника и сравнение поиска |
+| `WEB.md` | запуск страницы и описание API |
 | `ARCHITECTURE.md` | схема приложения, запуск Qdrant и следующие этапы |
 | `requirements.txt` | библиотеки для запуска проекта |
 | `requirements-dev.txt` | дополнительные инструменты проверки типов |
@@ -107,8 +115,8 @@ python -m unittest discover -s tests -v
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m mypy --strict prepare.py chunking.py embeddings.py index.py tests
-python -m pyright prepare.py chunking.py embeddings.py index.py tests
+python -m mypy --strict *.py tests
+python -m pyright *.py tests
 ```
 
 В редакторе нужно выбрать интерпретатор `.venv`, в который установлены зависимости.
@@ -194,3 +202,7 @@ python index.py --limit 100
 Для перехода к 500 статьям и новым контрольным запросам см. [расширенную проверку](evaluation/EXPANDED.md). Индексатор поддерживает `--timeout` (или `--timeout-seconds`), по умолчанию 300 секунд ожидания данных ответа одного пакета MWS.
 
 Триграммы и опечаточник описаны в [инструкции](evaluation/SPELLING.md). `python spellcheck.py build --qdrant-url http://127.0.0.1:6333` строит словарь без MWS; `python spellcheck.py suggest --query "автоматизаця документов"` проверяет предложение. В `search.py` исправления включаются явно через `--spelling-mode suggest` или `--spelling-mode apply`.
+
+Локальная оценка на 30 запросах: `python evaluate_spelling.py local`. Результаты и порядок сравнения выдачи описаны в [проверке опечаточника](evaluation/SPELLING_BENCHMARK.md).
+
+Страница поиска запускается командой `python web.py --qdrant-url http://127.0.0.1:6333` после обновления зависимостей. Затем откройте `http://127.0.0.1:8000`. Подробности — в [WEB.md](WEB.md).
