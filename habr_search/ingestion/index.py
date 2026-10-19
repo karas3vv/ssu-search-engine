@@ -7,12 +7,13 @@ import hashlib
 import json
 import math
 import os
+import signal
 import sqlite3
 from contextlib import ExitStack, closing
-from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Protocol
+from threading import Event
+from types import FrameType
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
@@ -25,23 +26,11 @@ from habr_search.embeddings import (
     DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key,
 )
 from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
+from habr_search.ingestion.pipeline import (
+    VECTOR_SIZE as VECTOR_SIZE, EmbeddingProvider as EmbeddingProvider, IndexStats as IndexStats,
+    IndexProgress, index_articles, remove_stale_chunks, save_chunks,
+)
 from habr_search.vector_store import connect_store, resolve_qdrant_config
-from habr_search.index_version import invalidate_index
-
-VECTOR_SIZE: int = 3584  # размерность, которую вернул проверенный деплоймент parser
-
-
-# интерфейс позволяет проверять запись в qdrant без настоящих запросов в mws
-class EmbeddingProvider(Protocol):
-    # получаем по одному вектору на каждую переданную строку
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
-
-
-# считаем новые и уже существовавшие фрагменты одной операции индексации
-@dataclass
-class IndexStats:
-    saved: int = 0  # новые точки, запись которых подтверждена qdrant
-    skipped: int = 0  # точки, которые уже были сохранены раньше
 
 
 # вычисляем имя коллекции из настроек модели и разбиения
@@ -103,37 +92,23 @@ def index_chunks(
         if not pending:
             continue
         vectors = embeddings.embed([chunk.embedding_text for chunk in pending])
-        if len(vectors) != len(pending) or any(len(vector) != vector_size for vector in vectors):
-            raise ValueError(f'ожидались векторы размерности {vector_size}; проверьте модель деплоймента')
-        points = [
-            models.PointStruct(
-                id=chunk.id, vector=vector,
-                payload={
-                    'article_id': chunk.article_id, 'chunk_index': chunk.chunk_index,
-                    'title': chunk.title, 'url': chunk.url, 'text': chunk.text,
-                    'hubs': list(chunk.hubs), 'published_at': chunk.published_at,
-                    'start_char': chunk.start_char, 'end_char': chunk.end_char,
-                    'token_count': chunk.token_count, 'text_hash': text_hash,
-                    'model': MODEL_ID, 'model_revision': MODEL_REVISION,
-                    'chunking_version': CHUNKING_VERSION,
-                },
-            )
-            for chunk, vector in zip(pending, vectors)
-        ]
-        # ждём подтверждения записи перед переходом к следующему пакету
-        invalidate_index(store, name)
-        store.upsert(collection_name=name, points=points, wait=True)
-        stats.saved += len(points)
-    # если текст статьи изменился, убираем её старые точки только после успешной записи новых
-    stale = models.Filter(
-        must=[models.FieldCondition(key='article_id', match=models.MatchValue(value=article_id))],
-        must_not=[models.HasIdCondition(has_id=[chunk.id for chunk in chunks])],
-    )
-    # повтор без изменений не меняет версию и не заставляет пересобирать словарь
-    if store.count(name, exact=True, count_filter=stale).count:
-        invalidate_index(store, name)
-        store.delete(name, points_selector=models.FilterSelector(filter=stale), wait=True)
+        save_chunks(store, name, [(chunk, text_hash) for chunk in pending], vectors, vector_size)
+        stats.saved += len(pending)
+    remove_stale_chunks(store, name, article_id, [chunk.id for chunk in chunks])
     return stats
+
+
+def print_progress(progress: IndexProgress) -> None:
+    """выводим подтверждённый прогресс и скорость новых фрагментов за весь текущий запуск."""
+    rate = progress.saved / progress.elapsed_seconds if progress.elapsed_seconds else 0.0
+    print(f'готово статей: {progress.articles}; фрагментов: {progress.saved + progress.skipped}; '
+          f'записано: {progress.saved}; уже было: {progress.skipped}; '
+          f'пакетов сохранено: {progress.batches}; новых фрагментов/с: {rate:.2f}', flush=True)
+
+
+def print_stopping() -> None:
+    """объясняем ожидание уже отправленных пакетов после ошибки или остановки."""
+    print('новые пакеты не отправляются; ожидаем текущие ответы и сохраняем успешные', flush=True)
 
 
 # настройки чтения корпуса, разбиения, отправки пакетов и подключения к qdrant
@@ -144,6 +119,7 @@ class CliArgs(argparse.Namespace):
     qdrant_url: str | None
     limit: int
     batch_size: int
+    workers: int
     max_tokens: int
     overlap_tokens: int
     timeout_seconds: float  # ожидание данных ответа mws для одного пакета
@@ -159,15 +135,16 @@ def main() -> int:
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного режима')
     location.add_argument('--qdrant-url', help='адрес сервера, например http://127.0.0.1:6333')
     parser.add_argument('--limit', type=int, default=5, help='общий лимит статей, включая уже обработанные')
-    parser.add_argument('--batch-size', type=int, default=4, help='число фрагментов в одном запросе mws')
+    parser.add_argument('--batch-size', type=int, default=8, help='число фрагментов в запросе mws, по умолчанию 8')
+    parser.add_argument('--workers', type=int, default=2, help='число одновременных запросов mws, по умолчанию 2')
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
     parser.add_argument('--timeout', '--timeout-seconds', dest='timeout_seconds', type=float, default=300.0,
                         help='ожидание данных ответа MWS в секундах, по умолчанию 300')
     parser.add_argument('--dry-run', action='store_true', help='посчитать фрагменты без mws и без записи индекса')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
-    if args.limit < 1 or args.batch_size < 1:
-        parser.error('limit и batch-size должны быть положительными')
+    if args.limit < 1 or args.batch_size < 1 or args.workers < 1:
+        parser.error('limit, batch-size и workers должны быть положительными')
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error('timeout должен быть положительным конечным числом')
     if not args.source.is_file():
@@ -180,13 +157,10 @@ def main() -> int:
         deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
         name = collection_name(url, deployment, config)
         prepared_stats = PreparationStats()
-        total = IndexStats()
         article_count = 0
         chunk_count = 0
         with ExitStack() as stack:
             prepared = stack.enter_context(closing(iter_prepared_articles(args.source, prepared_stats)))
-            store: QdrantClient | None = None
-            embeddings: EmbeddingsClient | None = None
             if not args.dry_run:
                 # проверяем qdrant до запроса ключа и платных обращений в mws
                 store = connect_store(store_config)
@@ -195,16 +169,28 @@ def main() -> int:
                 key = read_api_key()
                 # ожидание не входит в имя коллекции и не меняет id ранее записанных фрагментов
                 embedding_config = EmbeddingConfig(key, url, deployment, timeout_seconds=args.timeout_seconds)
-                embeddings = stack.enter_context(closing(EmbeddingsClient(embedding_config)))
-            for article in islice(prepared, args.limit):
-                chunks = list(chunk_article(article, tokenizer, config))
-                chunk_count += len(chunks)
-                if store is not None and embeddings is not None:
-                    stats = index_chunks(chunks, article.text_hash, store, name, embeddings, args.batch_size)
-                    total.saved += stats.saved
-                    total.skipped += stats.skipped
-                article_count += 1
-                print(f'статей: {article_count}; фрагментов: {chunk_count}; записано: {total.saved}; уже было: {total.skipped}', flush=True)
+                # отдельная http-сессия на каждого работника; qdrant остаётся в основном потоке
+                providers = [stack.enter_context(closing(EmbeddingsClient(embedding_config)))
+                             for _ in range(args.workers)]
+                stopped = Event()
+
+                def request_stop(signum: int, frame: FrameType | None) -> None:
+                    """ctrl+c просит остановку между записями, не обрывая готовый ответ модели."""
+                    stopped.set()
+
+                previous_handler = signal.signal(signal.SIGINT, request_stop)
+                try:
+                    result = index_articles(islice(prepared, args.limit), tokenizer, config, store, name,
+                                            providers, args.batch_size, on_progress=print_progress,
+                                            on_stopping=print_stopping, stop_requested=stopped.is_set)
+                    article_count = result.articles
+                finally:
+                    signal.signal(signal.SIGINT, previous_handler)
+            else:
+                for article in islice(prepared, args.limit):
+                    chunk_count += len(list(chunk_article(article, tokenizer, config)))
+                    article_count += 1
+                    print(f'статей: {article_count}; фрагментов: {chunk_count}', flush=True)
         print(f'коллекция: {name}')
         print(f'отклонено записей корпуса: {sum(prepared_stats.rejected.values())}')
         if args.dry_run:
