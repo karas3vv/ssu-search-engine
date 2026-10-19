@@ -1,4 +1,5 @@
 """делим статьи на фрагменты для будущего поискового индекса."""
+# вход: подготовленные статьи; выход: фрагменты с текстом, координатами и стабильными id
 from __future__ import annotations
 
 import argparse
@@ -36,6 +37,7 @@ class ChunkingConfig:
     max_tokens: int = 1024  # верхняя граница с учётом специальных токенов
     overlap_tokens: int = 128  # повторяем конец предыдущего фрагмента для связности
 
+    # проверяем, что лимит модели и перекрытие совместимы
     def __post_init__(self) -> None:
         if not 64 <= self.max_tokens <= MODEL_MAX_TOKENS:
             raise ValueError(f'max_tokens должен быть от 64 до {MODEL_MAX_TOKENS}')
@@ -62,11 +64,15 @@ class ArticleChunk:
 
 # интерфейс позволяет проверять разбиение без скачивания модели
 class TextTokenizer(Protocol):
+    # возвращаем границы токенов в символах исходного текста
     def offsets(self, text: str) -> list[tuple[int, int]]: ...
+    # считаем длину готового входа с учётом специальных токенов
     def count(self, text: str) -> int: ...
 
 
+# обёртка над файлом токенизатора gemma; веса модели здесь не загружаются
 class ModelTokenizer:
+    # проверяем формат токенизатора и включаем специальные токены gemma
     def __init__(self, path: Path) -> None:
         self.tokenizer: Tokenizer = Tokenizer.from_file(str(path))
         # отклоняем старый кеш e5 и файлы с несовместимыми специальными токенами
@@ -81,9 +87,11 @@ class ModelTokenizer:
         self.tokenizer.no_truncation()
         self.tokenizer.no_padding()
 
+    # получаем границы обычных токенов для нарезки исходного текста
     def offsets(self, text: str) -> list[tuple[int, int]]:
         return self.tokenizer.encode(text, add_special_tokens=False).offsets
 
+    # получаем фактическое число токенов во входе модели
     def count(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=True).ids)
 
@@ -111,6 +119,7 @@ def load_tokenizer(path: Path = DEFAULT_TOKENIZER) -> ModelTokenizer:
             temporary.unlink(missing_ok=True)
 
 
+# готовим заголовок, который будет добавлен перед текстом каждого фрагмента
 def embedding_header(title: str, tokenizer: TextTokenizer, max_tokens: int) -> str:
     # длинный заголовок сокращаем только во входе модели; полный сохраняем в метаданных
     offsets = tokenizer.offsets(title)
@@ -188,6 +197,7 @@ class CliArgs(argparse.Namespace):
     preview: int
 
 
+# читаем ограниченную часть корпуса, нарезаем её и показываем примеры со статистикой
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='база исходных статей')
@@ -228,5 +238,6 @@ def main() -> int:
         parser.exit(1, f'не удалось подготовить фрагменты: {exc}\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

@@ -1,4 +1,5 @@
 """проверяем корпус и подготавливаем статьи в памяти, не меняя исходную базу."""
+# вход: база скрапера; выход: поток проверенных статей и счётчики обработки
 from __future__ import annotations
 
 import argparse
@@ -93,6 +94,7 @@ def string_list(record: dict[str, object], key: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(result))
 
 
+# преобразуем сохранённый документ в подготовленную статью после проверки полей
 def prepare_article(payload: str, stored_id: int) -> PreparedArticle:
     # проверяем типы до передачи данных в индексатор
     decoded: object = json.loads(payload)
@@ -163,6 +165,7 @@ def iter_prepared_articles(
         db.close()
 
 
+# проверяем весь доступный корпус и печатаем статистику без создания нового файла данных
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
@@ -187,5 +190,6 @@ def main() -> int:
     return 0 if stats.accepted and not stats.rejected else 1
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

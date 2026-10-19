@@ -10,6 +10,7 @@ import requests
 from embeddings import EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, parse_vectors
 
 
+# собираем подставной http-ответ requests с заданным содержимым и статусом
 def response(payload: object, status: int = 200) -> requests.Response:
     result = requests.Response()
     result.status_code = status
@@ -18,7 +19,9 @@ def response(payload: object, status: int = 200) -> requests.Response:
     return result
 
 
+# группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class EmbeddingsTests(unittest.TestCase):
+    # ответ api может быть перемешан, поэтому порядок восстанавливается по index
     def test_response_order_uses_indices(self) -> None:
         payload = {'data': [
             {'index': 1, 'embedding': [3, 4]},
@@ -26,12 +29,14 @@ class EmbeddingsTests(unittest.TestCase):
         ]}
         self.assertEqual(parse_vectors(payload, 2), [[1.0, 2.0], [3.0, 4.0]])
 
+    # пустые, нулевые и нечисловые векторы не попадают в индекс
     def test_malformed_vectors_are_rejected(self) -> None:
         for vector in [[], [True], ['0.1'], [float('nan')], [float('inf')], [0, 0]]:
             with self.subTest(vector=vector):
                 with self.assertRaises(EmbeddingAPIError):
                     parse_vectors({'data': [{'index': 0, 'embedding': vector}]}, 1)
 
+    # повторные номера и разные размерности в одном ответе считаются ошибкой
     def test_duplicate_indices_and_mixed_dimensions_are_rejected(self) -> None:
         for items in [
             [{'index': 0, 'embedding': [1]}, {'index': 0, 'embedding': [2]}],
@@ -41,6 +46,7 @@ class EmbeddingsTests(unittest.TestCase):
                 with self.assertRaises(EmbeddingAPIError):
                     parse_vectors({'data': items}, 2)
 
+    # сверяем формат отправленного запроса и отсутствие скрытого изменения текста
     def test_request_matches_supplied_endpoint_and_preserves_input(self) -> None:
         config = EmbeddingConfig(api_key='test-key-not-real')
         client = EmbeddingsClient(config)
@@ -55,6 +61,7 @@ class EmbeddingsTests(unittest.TestCase):
             client.close()
         self.assertNotIn('test-key-not-real', repr(config))
 
+    # ошибка авторизации не выводит ключ или исходное тело ответа
     def test_authentication_error_does_not_expose_response_body(self) -> None:
         client = EmbeddingsClient(EmbeddingConfig(api_key='test-key-not-real'))
         try:
@@ -65,6 +72,7 @@ class EmbeddingsTests(unittest.TestCase):
         finally:
             client.close()
 
+    # пустые тексты отклоняются до сетевого запроса
     def test_empty_input_does_not_make_a_request(self) -> None:
         client = EmbeddingsClient(EmbeddingConfig(api_key='test-key-not-real'))
         try:
@@ -75,6 +83,7 @@ class EmbeddingsTests(unittest.TestCase):
         finally:
             client.close()
 
+    # различаем виды тайм-аута и проверяем, что запрос не повторяется автоматически
     def test_timeout_uses_configured_wait_without_automatic_retry(self) -> None:
         config = EmbeddingConfig(api_key='test-key-not-real', timeout_seconds=420.0)
         client = EmbeddingsClient(config)
@@ -97,5 +106,6 @@ class EmbeddingsTests(unittest.TestCase):
             client.close()
 
 
+# при прямом запуске выполняем тесты этого файла
 if __name__ == '__main__':
     unittest.main()

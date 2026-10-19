@@ -1,4 +1,5 @@
 """проверяем доступ к удалённой модели и получаем эмбеддинги через api mws."""
+# вход: строки текста; выход: числовые векторы удалённой модели
 from __future__ import annotations
 
 import argparse
@@ -21,13 +22,15 @@ class EmbeddingAPIError(RuntimeError):
     """ошибка подключения или некорректный ответ сервера."""
 
 
+# настройки удалённого деплоймента; ключ скрыт из строкового представления
 @dataclass(frozen=True)
 class EmbeddingConfig:
     api_key: str = field(repr=False)  # ключ не выводится при печати настроек
-    url: str = DEFAULT_URL
-    model: str = DEFAULT_MODEL
-    timeout_seconds: float = 120.0
+    url: str = DEFAULT_URL  # адрес метода получения векторов
+    model: str = DEFAULT_MODEL  # имя деплоймента на сервере mws
+    timeout_seconds: float = 120.0  # ожидание данных ответа; подключение ограничено отдельно
 
+    # проверяем ключ, адрес сервиса, имя деплоймента и допустимое ожидание
     def __post_init__(self) -> None:
         if not self.api_key.strip():
             raise ValueError('api-ключ не указан')
@@ -40,6 +43,7 @@ class EmbeddingConfig:
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError('тайм-аут должен быть положительным конечным числом')
 
+    # берём адрес и имя деплоймента из окружения, используя переданный ключ
     @classmethod
     def from_env(cls, api_key: str) -> EmbeddingConfig:
         return cls(
@@ -49,6 +53,7 @@ class EmbeddingConfig:
         )
 
 
+# проверяем, что часть ответа api является объектом, и уточняем её тип
 def json_object(value: object, name: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise EmbeddingAPIError(f'{name}: ожидался объект json')
@@ -64,6 +69,7 @@ def parse_vectors(payload: object, expected_count: int) -> list[list[float]]:
     items = cast(list[object], value)
     if len(items) != expected_count:
         raise EmbeddingAPIError('число векторов не совпадает с числом отправленных текстов')
+    # собираем векторы по номерам из ответа; порядок списка data может отличаться
     vectors: dict[int, list[float]] = {}
     dimension: int | None = None
     for item in items:
@@ -95,14 +101,18 @@ def parse_vectors(payload: object, expected_count: int) -> list[list[float]]:
     return [vectors[index] for index in range(expected_count)]
 
 
+# клиент переводит переданные строки в векторы через api mws
 class EmbeddingsClient:
+    # создаём сессию для повторного использования соединений
     def __init__(self, config: EmbeddingConfig) -> None:
         self.config: EmbeddingConfig = config
         self.session: requests.Session = requests.Session()
 
+    # освобождаем соединения после завершения работы с клиентом
     def close(self) -> None:
         self.session.close()
 
+    # отправляем пакет строк и возвращаем проверенные векторы в том же порядке
     def embed(self, texts: list[str]) -> list[list[float]]:
         # формат входных строк задаётся вызывающим кодом: клиент не добавляет префиксы e5
         if not texts or any(not text.strip() for text in texts):
@@ -151,9 +161,11 @@ class EmbeddingsClient:
                 payload: object = response.json()
             except ValueError:
                 raise EmbeddingAPIError('сервер вернул ответ не в формате json') from None
+            # проверка формата и чисел завершается до передачи векторов вызывающему коду
             return parse_vectors(payload, len(texts))
 
 
+# параметры отдельной проверки подключения к модели
 class CliArgs(argparse.Namespace):
     text: str
 
@@ -174,6 +186,7 @@ def read_api_key() -> str:
     return api_key
 
 
+# проверяем один текст и показываем размерность полученного вектора
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--text', default='Привет, как дела?', help='один текст для проверки api')
@@ -198,5 +211,6 @@ def main() -> int:
     return 0
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

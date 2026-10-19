@@ -1,4 +1,5 @@
 """собираем статьи хабра с возможностью продолжить после остановки."""
+# вход: ленты хабра; выход: база статей, очередь обхода и выгрузка в папке data
 from __future__ import annotations
 
 import argparse
@@ -23,21 +24,23 @@ ARTICLE: re.Pattern[str] = re.compile(r'^/ru/(?:articles|companies/[^/]+/article
 HUB: re.Pattern[str] = re.compile(r'^/ru/hubs/[^/]+/$')
 
 
+# различаем страницы лент и отдельные статьи в очереди обхода
 TaskKind = Literal['article', 'listing']
+# поля одной задачи: порядковый номер, url и тип страницы
 TaskRow = tuple[int, str, TaskKind]
 
 
 # структура сохраняемой статьи
 class ArticleDocument(TypedDict):
-    id: int
-    url: str
-    title: str
-    text: str
-    author: str | None
-    published_at: str | None
-    hubs: list[str]
-    tags: list[str]
-    fetched_at: str
+    id: int  # номер статьи на хабре
+    url: str  # ссылка на оригинал
+    title: str  # заголовок статьи
+    text: str  # полный текст без html-разметки
+    author: str | None  # ник автора, если найден
+    published_at: str | None  # время публикации из страницы
+    hubs: list[str]  # тематические разделы статьи
+    tags: list[str]  # теги из ссылок статьи
+    fetched_at: str  # время загрузки в utc
 
 
 # типы параметров командной строки
@@ -58,6 +61,7 @@ def string_attr(tag: Tag, name: str) -> str:
     return value
 
 
+# извлекаем из страницы ленты ссылки на отдельные статьи
 def article_links(html: str) -> tuple[list[str], BeautifulSoup]:
     # собираем ссылки на статьи из ленты без дублей
     soup = BeautifulSoup(html, 'html.parser')
@@ -70,6 +74,7 @@ def article_links(html: str) -> tuple[list[str], BeautifulSoup]:
     return list(result.values()), soup
 
 
+# получаем текст и метаданные статьи, а также ссылки на её тематические ленты
 def parse_article(html: str, url: str) -> tuple[ArticleDocument, list[str]]:
     # находим заголовок и основной текст статьи
     soup = BeautifulSoup(html, 'html.parser')
@@ -118,6 +123,7 @@ def parse_article(html: str, url: str) -> tuple[ArticleDocument, list[str]]:
 
 # загрузка страниц с паузами и повторными попытками
 class Fetcher:
+    # создаём сессию и задаём паузу между обращениями к хабру
     def __init__(self, delay: float) -> None:
         self.session: requests.Session = requests.Session()
         self.session.headers['User-Agent'] = AGENT
@@ -125,6 +131,7 @@ class Fetcher:
         self.last: float = time.monotonic()  # выдерживаем паузу и после перезапуска
         self.robots: RobotFileParser | None = None
 
+    # загружаем одну страницу с контролем адреса, паузами и обработкой сетевых ошибок
     def get(self, url: str) -> str:
         # проверяем домен и разрешение в robots.txt
         if urlsplit(url).netloc != 'habr.com':
@@ -162,6 +169,7 @@ class Fetcher:
                 time.sleep(10 * (2 ** attempt))
         raise RuntimeError('request failed')
 
+    # загружаем правила обхода и учитываем заданную сайтом задержку
     def load_robots(self) -> None:
         # читаем правила сайта и учитываем интервал запросов
         robots = RobotFileParser()
@@ -170,6 +178,7 @@ class Fetcher:
         self.delay = max(self.delay, float(robots.crawl_delay(AGENT) or 0))
 
 
+# собираем актуальную выгрузку из статей, уже сохранённых в базе
 def export(db: sqlite3.Connection, output: Path) -> None:
     # выгружаем статьи: одна строка jsonl на документ
     temporary = output.with_suffix('.tmp')
@@ -180,6 +189,7 @@ def export(db: sqlite3.Connection, output: Path) -> None:
     temporary.replace(output)
 
 
+# связываем очередь ссылок, загрузку страниц, разбор статей и запись результатов
 def main() -> int:
     # читаем настройки запуска
     parser = argparse.ArgumentParser(description=__doc__)
@@ -198,6 +208,7 @@ def main() -> int:
                         handlers=[logging.StreamHandler(), logging.FileHandler(args.data_dir / 'crawl.log')])
     # открываем базу со статьями и очередью ссылок
     db: sqlite3.Connection = sqlite3.connect(args.data_dir / 'corpus.sqlite3')
+    # articles хранит документы, queue хранит ссылки и состояние их обработки
     db.executescript('''
     CREATE TABLE IF NOT EXISTS articles(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL,
@@ -209,6 +220,7 @@ def main() -> int:
         db.close()
         return 0
 
+    # добавляем новую задачу; уникальность url в базе защищает от дублей
     def enqueue(url: str, kind: TaskKind) -> None:
         # добавляем ссылку, если её ещё нет в очереди
         db.execute('INSERT OR IGNORE INTO queue(url,kind) VALUES (?,?)', (url, kind))
@@ -297,5 +309,6 @@ def main() -> int:
     return 0 if total >= args.limit else 2
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

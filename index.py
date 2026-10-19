@@ -1,4 +1,5 @@
 """индексируем фрагменты через mws и сохраняем их в qdrant."""
+# поток обработки: sqlite → подготовка → фрагменты → mws → qdrant
 from __future__ import annotations
 
 import argparse
@@ -30,17 +31,21 @@ VECTOR_SIZE: int = 3584  # размерность, которую вернул �
 
 # интерфейс позволяет проверять запись в qdrant без настоящих запросов в mws
 class EmbeddingProvider(Protocol):
+    # получаем по одному вектору на каждую переданную строку
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
+# считаем новые и уже существовавшие фрагменты одной операции индексации
 @dataclass
 class IndexStats:
     saved: int = 0  # новые точки, запись которых подтверждена qdrant
     skipped: int = 0  # точки, которые уже были сохранены раньше
 
 
+# вычисляем имя коллекции из настроек модели и разбиения
 def collection_name(url: str, deployment: str, config: ChunkingConfig) -> str:
     # другой деплоймент или настройки разбиения получают отдельную коллекцию
+    # настройки входят в отпечаток, чтобы случайно не смешать несовместимые векторы
     settings = {
         'url': url, 'deployment': deployment, 'model': MODEL_ID,
         'revision': MODEL_REVISION, 'chunking_version': CHUNKING_VERSION,
@@ -51,6 +56,7 @@ def collection_name(url: str, deployment: str, config: ChunkingConfig) -> str:
     return f'habr_gemma2_{signature}'
 
 
+# создаём подходящую коллекцию либо проверяем совместимость существующей
 def ensure_collection(
     store: QdrantClient, name: str, vector_size: int = VECTOR_SIZE,
     *, create_article_index: bool = False,
@@ -88,6 +94,7 @@ def index_chunks(
         records = store.retrieve(
             name, ids=[chunk.id for chunk in batch], with_payload=False, with_vectors=False,
         )
+        # уже записанные точки можно пропустить без повторной оплаты вычисления векторов
         existing = {str(record.id) for record in records}
         pending = [chunk for chunk in batch if chunk.id not in existing]
         stats.skipped += len(batch) - len(pending)
@@ -126,6 +133,7 @@ def index_chunks(
     return stats
 
 
+# настройки чтения корпуса, разбиения, отправки пакетов и подключения к qdrant
 class CliArgs(argparse.Namespace):
     source: Path
     tokenizer_file: Path
@@ -138,6 +146,7 @@ class CliArgs(argparse.Namespace):
     dry_run: bool
 
 
+# обрабатываем статьи по очереди, отправляем новые фрагменты в модель и сохраняем результат
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
@@ -204,5 +213,6 @@ def main() -> int:
         parser.exit(1, f'индексация остановлена: {exc}\nсохранённые пакеты можно использовать при следующем запуске\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

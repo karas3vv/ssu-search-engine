@@ -1,4 +1,5 @@
 """ищем статьи по смыслу запроса через gemma в mws и qdrant."""
+# поток поиска: запрос → инструкция gemma → вектор mws → статьи из qdrant
 from __future__ import annotations
 
 import argparse
@@ -23,10 +24,10 @@ MAX_QUERY_TOKENS: int = 1024
 # результат представляет статью с её лучшим фрагментом
 @dataclass(frozen=True)
 class SearchResult:
-    article_id: int
-    title: str
-    url: str
-    text: str
+    article_id: int  # номер исходной статьи
+    title: str  # заголовок для отображения
+    url: str  # ссылка на оригинал
+    text: str  # текст лучшего найденного фрагмента
     score: float  # оценка алгоритма поиска, а не вероятность правильного ответа
 
 
@@ -40,6 +41,7 @@ def build_query(query: str, raw: bool = False) -> str:
     return f'<instruct>{QUERY_INSTRUCTION}\n<query>{query}'
 
 
+# проверяем, что нужная коллекция существует, совместима и содержит точки
 def validate_collection(store: QdrantClient, name: str, vector_size: int = VECTOR_SIZE) -> None:
     # поиск не создаёт и не изменяет коллекцию
     if not store.collection_exists(name):
@@ -52,6 +54,7 @@ def validate_collection(store: QdrantClient, name: str, vector_size: int = VECTO
         raise ValueError('коллекция пуста; сначала проиндексируйте статьи')
 
 
+# ищем близкие векторы и получаем разные статьи с лучшими фрагментами
 def search_articles(
     store: QdrantClient, name: str, vector: list[float], top_k: int = 5,
     vector_size: int = VECTOR_SIZE,
@@ -70,6 +73,7 @@ def search_articles(
         if not group.hits:
             continue
         hit = group.hits[0]
+        # payload содержит текст и метаданные, сохранённые вместе с вектором
         payload = hit.payload or {}
         article_id: object = payload.get('article_id')
         title: object = payload.get('title')
@@ -82,6 +86,7 @@ def search_articles(
     return results
 
 
+# настройки запроса, коллекции и отображения результатов
 class CliArgs(argparse.Namespace):
     query: str
     qdrant_url: str | None
@@ -94,6 +99,7 @@ class CliArgs(argparse.Namespace):
     raw_query: bool
 
 
+# готовим запрос, получаем его вектор и печатаем найденные статьи
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--query', required=True, help='поисковый запрос')
@@ -122,6 +128,7 @@ def main() -> int:
             # проверяем индекс до запроса ключа и обращения в платный api
             validate_collection(store, name)
             tokenizer = load_tokenizer(args.tokenizer_file)
+            # длинный запрос отклоняем целиком, чтобы скрытое обрезание не меняло его смысл
             if tokenizer.count(query) > MAX_QUERY_TOKENS:
                 raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов; сократите его')
             key = read_api_key()
@@ -149,5 +156,6 @@ def main() -> int:
         parser.exit(1, f'поиск не выполнен: {exc}\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

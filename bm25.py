@@ -1,4 +1,5 @@
 """ищем по словам в тех же фрагментах qdrant, без обращений к модели."""
+# поток поиска: тексты qdrant → словарный индекс в памяти → оценки bm25 → разные статьи
 from __future__ import annotations
 
 import argparse
@@ -23,24 +24,28 @@ from index import collection_name
 from search import SearchResult, validate_collection
 from vector_store import connect_store, resolve_qdrant_config
 
+# выделяем слова и числа, сохраняя окончания технических имён вроде c++ и c#
 TOKEN_PATTERN: re.Pattern[str] = re.compile(r'[^\W_]+(?:\+\+|#)?', re.UNICODE)
 BM25_VERSION: str = '1'  # меняем при изменении формулы или нормализации
 
 
+# текст и метаданные точки qdrant, достаточные для поиска по словам
 @dataclass(frozen=True)
 class IndexedChunk:
-    point_id: str
-    article_id: int
-    title: str
-    url: str
-    text: str
+    point_id: str  # id отдельного фрагмента в qdrant
+    article_id: int  # id исходной статьи для группировки результатов
+    title: str  # заголовок, добавляемый к тексту фрагмента
+    url: str  # ссылка на оригинальную статью
+    text: str  # текст фрагмента из поискового индекса
 
 
+# параметры насыщения частоты слова и поправки на длину фрагмента
 @dataclass(frozen=True)
 class BM25Config:
     k1: float = 1.2  # насыщение частоты: повторы слова дают всё меньшую прибавку
     b: float = 0.75  # поправка на длину фрагмента
 
+    # проверяем границы параметров, чтобы формула давала конечные значения
     def __post_init__(self) -> None:
         if not math.isfinite(self.k1) or self.k1 < 0:
             raise ValueError('k1 должен быть неотрицательным конечным числом')
@@ -48,15 +53,18 @@ class BM25Config:
             raise ValueError('b должен быть конечным числом от 0 до 1')
 
 
+# приводим написание к общему виду и выделяем слова и технические названия
 def tokenize(text: str) -> list[str]:
     # одна нормализация применяется к запросам и документам; словари пока не используются
     normalized = unicodedata.normalize('NFKC', text).casefold().replace('ё', 'е')
     return TOKEN_PATTERN.findall(normalized)
 
 
+# читаем все страницы точек qdrant с текстами, не скачивая векторы
 def load_indexed_chunks(store: QdrantClient, name: str, batch_size: int = 256) -> list[IndexedChunk]:
     if batch_size < 1:
         raise ValueError('размер страницы должен быть положительным')
+    # проверяем число точек до и после чтения всех страниц
     initial_count = store.count(name, exact=True).count
     if not initial_count:
         raise ValueError('коллекция пуста')
@@ -89,23 +97,28 @@ def load_indexed_chunks(store: QdrantClient, name: str, batch_size: int = 256) -
     return chunks
 
 
+# фиксируем id, тексты и метаданные прочитанного корпуса независимо от порядка чтения
 def corpus_hash(chunks: Sequence[IndexedChunk]) -> str:
     digest = hashlib.sha256()
     for chunk in sorted(chunks, key=lambda item: item.point_id):
         for value in [chunk.point_id, str(chunk.article_id), chunk.title, chunk.url, chunk.text]:
             encoded = value.encode('utf-8')
+            # длина перед содержимым разделяет поля без неоднозначного склеивания
             digest.update(len(encoded).to_bytes(8, 'big'))
             digest.update(encoded)
     return digest.hexdigest()
 
 
+# индекс в памяти связывает слова с фрагментами и частотами их появления
 class BM25Index:
+    # строим списки вхождений слов и считаем длины фрагментов
     def __init__(self, chunks: Sequence[IndexedChunk], config: BM25Config = BM25Config()) -> None:
         if not chunks:
             raise ValueError('для bm25 нужен непустой набор фрагментов')
         self.chunks: tuple[IndexedChunk, ...] = tuple(chunks)
         self.config: BM25Config = config
         self.lengths: list[int] = []
+        # для каждого слова храним номера фрагментов и число повторов в них
         self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
         ids: set[str] = set()
         for position, chunk in enumerate(self.chunks):
@@ -117,10 +130,12 @@ class BM25Index:
             self.lengths.append(sum(frequencies.values()))
             for term, frequency in frequencies.items():
                 self.postings[term].append((position, frequency))
+        # средняя длина нужна, чтобы длинные фрагменты не выигрывали только из-за размера
         self.average_length: float = sum(self.lengths) / len(self.chunks)
         if self.average_length == 0:
             raise ValueError('в корпусе нет слов для поиска')
 
+    # считаем bm25 для совпавших слов и оставляем лучший фрагмент каждой статьи
     def search(self, query: str, top_k: int = 5) -> list[SearchResult]:
         if top_k < 1:
             raise ValueError('top-k должен быть положительным')
@@ -132,14 +147,18 @@ class BM25Index:
             matches = self.postings.get(term, [])
             if not matches:
                 continue
+            # редкое слово получает больший вес, чем слово почти во всех фрагментах
             idf = math.log1p((len(self.chunks) - len(matches) + 0.5) / (len(matches) + 0.5))
             for position, frequency in matches:
+                # параметры k1 и b управляют насыщением повторов и поправкой на длину
                 norm = self.config.k1 * (1 - self.config.b + self.config.b * self.lengths[position] / self.average_length)
                 scores[position] += idf * frequency * (self.config.k1 + 1) / (frequency + norm)
+        # сортируем по убыванию оценки, а равенства разрешаем устойчивыми id
         ranked = sorted(scores, key=lambda position: (
             -scores[position], self.chunks[position].article_id, self.chunks[position].point_id,
         ))
         found: list[SearchResult] = []
+        # после ранжирования оставляем каждой статье только её лучший фрагмент
         seen: set[int] = set()
         for position in ranked:
             chunk = self.chunks[position]
@@ -152,6 +171,7 @@ class BM25Index:
         return found
 
 
+# настройки поиска по словам и подключения к существующей коллекции
 class CliArgs(argparse.Namespace):
     query: str
     top_k: int
@@ -163,6 +183,7 @@ class CliArgs(argparse.Namespace):
     b: float
 
 
+# загружаем фрагменты в память и показываем выдачу bm25 для одного запроса
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--query', required=True)
@@ -206,5 +227,6 @@ def main() -> int:
         parser.exit(1, f'поиск bm25 не выполнен: {exc}\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

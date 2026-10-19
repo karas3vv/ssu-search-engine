@@ -22,31 +22,39 @@ from index import VECTOR_SIZE, collection_name, ensure_collection
 from search import build_query
 
 
+# простой токенизатор для тестов считает символы вместо токенов настоящей модели
 class CharacterTokenizer:
+    # прибавляем два условных специальных токена к числу символов
     def count(self, text: str) -> int:
         return len(text) + 2
 
+    # считаем каждый символ отдельным токеном с известными границами
     def offsets(self, text: str) -> list[tuple[int, int]]:
         return [(i, i + 1) for i in range(len(text))]
 
 
+# подставной клиент хранит историю вызовов и позволяет имитировать сбой модели
 class FakeEmbeddings:
+    # сохраняем параметры подставного клиента и готовим историю вызовов
     def __init__(self, vector_size: int = 3, fail_on_call: int | None = None) -> None:
         self.calls: list[list[str]] = []
         self.vector_size: int = vector_size
         self.fail_on_call: int | None = fail_on_call
         self.closed: bool = False
 
+    # возвращаем подставные векторы и при заданной настройке имитируем ошибку
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(texts)
         if len(self.calls) == self.fail_on_call:
             raise EmbeddingAPIError('синтетический сбой')
         return [[1.0] + [0.0] * (self.vector_size - 1) for _ in texts]
 
+    # отмечаем освобождение клиента, чтобы проверить закрытие ресурсов
     def close(self) -> None:
         self.closed = True
 
 
+# сохраняем временный csv с контрольными запросами для проверки команды
 def write_queries(path: Path, rows: list[list[str]]) -> None:
     with path.open('w', encoding='utf-8', newline='') as target:
         writer = csv.writer(target)
@@ -54,6 +62,7 @@ def write_queries(path: Path, rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
+# добавляем синтетическую точку в локальную тестовую коллекцию
 def add_point(store: QdrantClient, point_id: int, article_id: int, vector: list[float]) -> None:
     store.upsert('test', points=[models.PointStruct(id=point_id, vector=vector, payload={
         'article_id': article_id, 'title': f'статья {article_id}',
@@ -61,7 +70,9 @@ def add_point(store: QdrantClient, point_id: int, article_id: int, vector: list[
     })])
 
 
+# группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class EvaluationTests(unittest.TestCase):
+    # для продолжения нужен согласованный отчёт с теми же настройками и разметкой
     def test_report_resume_rejects_different_settings_and_corrupt_results(self) -> None:
         case = EvaluationQuery('one', 'exact', 'запрос', (1,))
         context = ReportContext('test', 1, query_set_hash([case]), False, 5)
@@ -89,6 +100,7 @@ class EvaluationTests(unittest.TestCase):
                     load_report(source, [case], context)
                 self.assertEqual(before, source.read_bytes())
 
+    # допускаем отчёт без готовых строк и корректно сохраняем отсутствие попаданий
     def test_report_resume_accepts_empty_header_and_valid_misses(self) -> None:
         case = EvaluationQuery('one', 'exact', 'запрос', (1,))
         context = ReportContext('test', 1, query_set_hash([case]), False, 5)
@@ -106,6 +118,7 @@ class EvaluationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_report(source, [case], context)
 
+    # проверяем метрики при разных местах, нескольких подходящих статьях и пропусках
     def test_metrics_handle_misses_cutoff_and_multiple_relevant_articles(self) -> None:
         case = EvaluationQuery('one', 'exact', 'запрос', (10, 20))
         first = score_ranking(case, [20, 30, 10], 3)
@@ -126,6 +139,7 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize([])
 
+    # чтение csv сохраняет кавычки и несколько id, а отпечаток отражает изменения набора
     def test_csv_supports_quotes_and_multiple_relevant_ids(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'queries.csv'
@@ -137,6 +151,7 @@ class EvaluationTests(unittest.TestCase):
             different = [EvaluationQuery('case', 'paraphrase', 'другой запрос', (10, 20))]
             self.assertNotEqual(query_set_hash(cases), query_set_hash(different))
 
+    # повторы запросов и ошибочные id отклоняются до оценки
     def test_csv_rejects_duplicate_queries_identifiers_and_invalid_ids(self) -> None:
         variants: list[list[list[str]]] = [
             [], [['case', 'exact', '', '1']], [['case', 'exact', 'запрос', '0']],
@@ -151,6 +166,7 @@ class EvaluationTests(unittest.TestCase):
                 with self.subTest(rows=rows), self.assertRaises(ValueError):
                     load_queries(path)
 
+    # инструкция добавляется в нужном режиме, а слишком длинный запрос отклоняется заранее
     def test_preflight_rejects_long_queries_and_checks_raw_prompt(self) -> None:
         case = EvaluationQuery('short', 'exact', 'запрос', (1,))
         prepared = prepare_queries([case], CharacterTokenizer())
@@ -160,6 +176,7 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'long'):
             prepare_queries([case, long], CharacterTokenizer())
 
+    # оценка использует реальную группировку статей на подставных векторах
     def test_evaluation_reuses_grouped_search_and_does_not_modify_index(self) -> None:
         case = EvaluationQuery('find', 'paraphrase', 'запрос', (2,))
         backend = FakeEmbeddings()
@@ -178,6 +195,7 @@ class EvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '99'):
                 validate_expected_articles(store, 'test', [case, missing])
 
+    # пробная оценка проверяет только csv без подключения, скачиваний и записи отчёта
     def test_dry_run_does_not_connect_prompt_download_or_write_report(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'results.csv'
@@ -191,6 +209,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertIn('контрольных запросов: 18', stdout.getvalue())
             self.assertFalse(output.exists())
 
+    # недопустимое ожидание отклоняется ещё при проверке аргументов
     def test_invalid_timeout_is_rejected_before_loading_or_connecting(self) -> None:
         for value in ['0', '-1', 'nan', 'inf']:
             with (self.subTest(value=value), patch('sys.argv', ['evaluate.py', '--timeout', value]),
@@ -200,6 +219,7 @@ class EvaluationTests(unittest.TestCase):
                 main()
             self.assertEqual(error.exception.code, 2)
 
+    # готовый отчёт не перезаписывается при повторном выборе того же пути
     def test_existing_report_is_preserved_before_api_access(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'results.csv'
@@ -213,6 +233,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 1)
             self.assertEqual(output.read_text(encoding='utf-8'), 'предыдущий отчёт')
 
+    # отсутствие ожидаемой статьи обнаруживается до ввода ключа и создания отчёта
     def test_missing_expected_article_stops_before_prompt_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as folder, closing(QdrantClient(location=':memory:')) as store:
             source = Path(folder) / 'queries.csv'
@@ -236,6 +257,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertIn('99', stderr.getvalue())
             self.assertFalse(output.exists())
 
+    # сбой оставляет завершённые строки, а итоговая сводка появляется только после полного запуска
     def test_cli_preserves_completed_rows_on_failure_and_summarizes_only_success(self) -> None:
         for failure in [None, 2]:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
@@ -281,6 +303,7 @@ class EvaluationTests(unittest.TestCase):
                 else:
                     self.assertNotIn('MRR@5:', stdout.getvalue())
 
+    # продолжение пропускает готовые запросы и сохраняет старые отчёты и время проверок
     def test_cli_resumes_without_reembedding_completed_queries(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'queries.csv'
@@ -346,5 +369,6 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(rows[0], original_row)
 
 
+# при прямом запуске выполняем тесты этого файла
 if __name__ == '__main__':
     unittest.main()

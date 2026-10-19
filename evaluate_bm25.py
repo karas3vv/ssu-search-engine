@@ -1,4 +1,5 @@
 """оцениваем bm25 и сравниваем с готовым отчётом семантического поиска."""
+# сравниваем bm25 с сохранённой выдачей gemma на тех же запросах и фрагментах
 from __future__ import annotations
 
 import argparse
@@ -21,6 +22,7 @@ from index import collection_name
 from search import validate_collection
 from vector_store import connect_store, resolve_qdrant_config
 
+# формат содержит настройки bm25 и может хранить места из отчёта gemma
 REPORT_COLUMNS: tuple[str, ...] = (
     'started_at', 'method', 'bm25_version', 'k1', 'b', 'collection', 'collection_points',
     'corpus_sha256', 'query_set_sha256', 'top_k', 'query_id', 'category', 'query',
@@ -29,6 +31,7 @@ REPORT_COLUMNS: tuple[str, ...] = (
 )
 
 
+# печатаем метрики всего набора и отдельных категорий запросов
 def print_summary(label: str, results: list[QueryEvaluation], top_k: int) -> None:
     summary = summarize(results)
     print(f'{label}: Hit@{top_k} {summary.hit_rate:.2%} ({summary.hits}/{summary.count}); MRR@{top_k} {summary.mrr:.4f}')
@@ -37,6 +40,7 @@ def print_summary(label: str, results: list[QueryEvaluation], top_k: int) -> Non
         print(f'  {category}: запросов {group.count}; Hit@{top_k} {group.hit_rate:.2%}; MRR@{top_k} {group.mrr:.4f}')
 
 
+# настройки оценки bm25 и необязательного сравнения с отчётом gemma
 class CliArgs(argparse.Namespace):
     queries: Path
     output: Path | None
@@ -52,6 +56,7 @@ class CliArgs(argparse.Namespace):
     b: float
 
 
+# считаем выдачу bm25, сравниваем с готовым отчётом и сохраняем результаты без вызова модели
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--queries', type=Path, default=DEFAULT_QUERIES)
@@ -95,6 +100,7 @@ def main() -> int:
                 raise ValueError('в индексе отсутствуют ожидаемые статьи: ' + ', '.join(map(str, sorted(missing))))
             fingerprint = query_set_hash(cases)
             semantic: dict[str, ReportEntry] = {}
+            # считываем сохранённую семантическую выдачу вместо новых обращений к модели
             if args.semantic_report is not None:
                 semantic = load_report(args.semantic_report, cases, ReportContext(
                     name, point_count, fingerprint, args.semantic_raw_query, args.top_k,
@@ -102,6 +108,7 @@ def main() -> int:
                 if len(semantic) != len(cases):
                     raise ValueError('семантический отчёт неполный; сначала завершите evaluate.py')
             index = BM25Index(chunks, config)
+            # для каждой проверки сравниваем найденные id с той же ручной разметкой
             results = [score_ranking(case, [item.article_id for item in index.search(case.query, args.top_k)], args.top_k)
                        for case in cases]
             # повторное чтение выявляет изменение текстов и метаданных во время оценки
@@ -129,6 +136,7 @@ def main() -> int:
         print(f'отчёт: {output}')
         print_summary('BM25', results, args.top_k)
         if semantic:
+            # сопоставляем результаты по именам запросов, а не по случайному порядку строк
             baseline = [semantic[case.query_id].result for case in cases]
             print_summary('Gemma (сохранённый отчёт)', baseline, args.top_k)
             improved = sum(item.reciprocal_rank > semantic[item.case.query_id].result.reciprocal_rank for item in results)
@@ -147,5 +155,6 @@ def main() -> int:
         parser.exit(1, f'оценка bm25 не завершена: {exc}\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

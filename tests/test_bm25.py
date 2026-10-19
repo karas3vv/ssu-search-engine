@@ -23,11 +23,14 @@ from evaluate_bm25 import main
 from index import VECTOR_SIZE, collection_name, ensure_collection
 
 
+# создаём отдельный текстовый фрагмент для проверки bm25
 def chunk(point_id: str, article_id: int, text: str, title: str = '') -> IndexedChunk:
     return IndexedChunk(point_id, article_id, title, f'https://example.com/{article_id}', text)
 
 
+# группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class BM25Tests(unittest.TestCase):
+    # сверяем оценку bm25 с ручным расчётом и проверяем повторы слов запроса
     def test_formula_matches_hand_calculation_and_query_repeats_do_not_boost(self) -> None:
         index = BM25Index([chunk('a', 1, 'excel excel'), chunk('b', 2, 'excel'), chunk('c', 3, 'word')])
         found = index.search('EXCEL')
@@ -39,10 +42,12 @@ class BM25Tests(unittest.TestCase):
         self.assertEqual(index.search('неизвестно'), [])
         self.assertEqual(index.search('?!'), [])
 
+    # проверяем регистр, ё, unicode и сохранение обозначений c++ и c#
     def test_normalization_handles_russian_unicode_and_technical_names(self) -> None:
         self.assertEqual(tokenize('ЁЖ ёж ＥＸＣＥＬ Python C++ C# execute_excel4macro'),
                          ['еж', 'еж', 'excel', 'python', 'c++', 'c#', 'execute', 'excel4macro'])
 
+    # одна статья занимает одно место, а равные оценки дают устойчивый порядок
     def test_grouping_returns_best_chunk_of_each_article_with_stable_ties(self) -> None:
         chunks = [chunk('b', 1, 'excel'), chunk('a', 1, 'excel'), chunk('c', 2, 'excel')]
         index = BM25Index(chunks)
@@ -51,12 +56,14 @@ class BM25Tests(unittest.TestCase):
         titled = BM25Index([chunk('x', 3, 'обычный текст', title='ExecuteExcel4Macro')])
         self.assertEqual(titled.search('ExecuteExcel4Macro')[0].article_id, 3)
 
+    # проверяем влияние длины фрагмента и отключение этой поправки
     def test_length_normalization_prefers_shorter_chunk_for_same_frequency(self) -> None:
         chunks = [chunk('a', 1, 'excel ' + 'word ' * 40), chunk('b', 2, 'excel word')]
         self.assertEqual(BM25Index(chunks).search('excel')[0].article_id, 2)
         scores = BM25Index(chunks, BM25Config(b=0)).search('excel')
         self.assertAlmostEqual(scores[0].score, scores[1].score)
 
+    # ошибочные параметры и повторные id фрагментов отклоняются
     def test_invalid_settings_and_duplicate_chunks_are_rejected(self) -> None:
         for k1, b in [(-1.0, 0.75), (float('nan'), 0.75), (1.2, 1.1), (1.2, float('inf'))]:
             with self.subTest(k1=k1, b=b), self.assertRaises(ValueError):
@@ -70,6 +77,7 @@ class BM25Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             BM25Index([chunk('a', 1, 'word')]).search('word', 0)
 
+    # постраничное чтение получает весь корпус и выявляет неверные метаданные
     def test_scroll_reads_all_pages_without_mutating_points(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             ensure_collection(store, 'test', 3)
@@ -88,6 +96,7 @@ class BM25Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_indexed_chunks(store, 'test')
 
+    # сравнение использует готовый отчёт, а обращения к модели запрещены подменами
     def test_cli_compares_saved_semantic_report_without_model_or_key(self) -> None:
         for complete in [True, False]:
             with self.subTest(complete=complete), tempfile.TemporaryDirectory() as folder:
@@ -146,5 +155,6 @@ class BM25Tests(unittest.TestCase):
                     self.assertFalse(output.exists())
 
 
+# при прямом запуске выполняем тесты этого файла
 if __name__ == '__main__':
     unittest.main()

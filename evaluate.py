@@ -1,4 +1,5 @@
 """оцениваем поиск на контрольных запросах с известными подходящими статьями."""
+# поток оценки: csv запросов → выдача поиска → места подходящих статей → csv и метрики
 from __future__ import annotations
 
 import argparse
@@ -26,6 +27,7 @@ from vector_store import connect_store, resolve_qdrant_config
 ROOT: Path = Path(__file__).resolve().parent
 DEFAULT_QUERIES: Path = ROOT / 'evaluation' / 'queries.csv'
 QUERY_COLUMNS: tuple[str, ...] = ('query_id', 'category', 'query', 'relevant_article_ids')
+# порядок полей csv фиксирован: по нему проверяется совместимость старого отчёта
 REPORT_COLUMNS: tuple[str, ...] = (
     'started_at', 'collection', 'collection_points', 'query_set_sha256', 'raw_query', 'top_k',
     'query_id', 'category', 'query', 'relevant_article_ids', 'retrieved_article_ids',
@@ -33,50 +35,58 @@ REPORT_COLUMNS: tuple[str, ...] = (
 )
 
 
+# контрольный запрос и список известных подходящих статей для него
 @dataclass(frozen=True)
 class EvaluationQuery:
     query_id: str  # устойчивое имя проверки для сравнения разных запусков
     category: str  # exact, paraphrase, alias, typo или своя группа
-    query: str
+    query: str  # исходный текст, который проверяем поиском
     relevant_ids: tuple[int, ...]  # известные подходящие статьи; разметка может быть неполной
 
 
+# найденные статьи и место первого подходящего результата для одного запроса
 @dataclass(frozen=True)
 class QueryEvaluation:
-    case: EvaluationQuery
-    retrieved_ids: tuple[int, ...]
-    first_relevant_rank: int | None
+    case: EvaluationQuery  # исходный запрос вместе с его разметкой
+    retrieved_ids: tuple[int, ...]  # статьи в порядке выдачи, ограниченные top-k
+    first_relevant_rank: int | None  # место первой подходящей статьи или none при отсутствии
 
+    # превращаем место в число для mrr: первое место даёт 1, отсутствие даёт 0
     @property
     def reciprocal_rank(self) -> float:
         return 1.0 / self.first_relevant_rank if self.first_relevant_rank is not None else 0.0
 
 
+# итоговые метрики по всем запросам или по одной категории
 @dataclass(frozen=True)
 class EvaluationSummary:
-    count: int
-    hits: int
+    count: int  # число завершённых проверок
+    hits: int  # сколько запросов нашли подходящую статью в top-k
     hit_rate: float  # доля запросов с подходящей статьёй в первых k результатах
     mrr: float  # среднее обратное место первой подходящей статьи в пределах k
 
 
+# настройки, которые должны совпасть при продолжении сохранённого отчёта
 @dataclass(frozen=True)
 class ReportContext:
-    collection: str
-    collection_points: int
-    query_set_sha256: str
-    raw_query: bool
-    top_k: int
+    collection: str  # имя коллекции с фрагментами
+    collection_points: int  # число точек во время оценки
+    query_set_sha256: str  # отпечаток выбранных запросов и разметки
+    raw_query: bool  # передаём запрос без добавления инструкции на стороне клиента
+    top_k: int  # сколько первых статей учитывается в метриках
 
 
+# результат проверки вместе с временем начала исходного запуска
 @dataclass(frozen=True)
 class ReportEntry:
-    started_at: str
-    result: QueryEvaluation
+    started_at: str  # время начала запуска, в котором получен результат
+    result: QueryEvaluation  # сохранённая выдача и рассчитанное место
 
 
+# читаем csv с разметкой и проверяем обязательные поля, id и отсутствие повторов
 def load_queries(path: Path) -> list[EvaluationQuery]:
     cases: list[EvaluationQuery] = []
+    # отдельно отслеживаем повторы имён проверок и текстов запросов
     identifiers: set[str] = set()
     queries: set[str] = set()
     with path.open(encoding='utf-8-sig', newline='') as source:
@@ -109,6 +119,7 @@ def load_queries(path: Path) -> list[EvaluationQuery]:
     return cases
 
 
+# определяем место первой подходящей статьи только в пределах top-k
 def score_ranking(case: EvaluationQuery, article_ids: Sequence[int], top_k: int) -> QueryEvaluation:
     if top_k < 1:
         raise ValueError('top-k должен быть положительным')
@@ -117,10 +128,12 @@ def score_ranking(case: EvaluationQuery, article_ids: Sequence[int], top_k: int)
         raise ValueError('выдача должна содержать положительные id статей')
     if len(set(retrieved)) != len(retrieved):
         raise ValueError('выдача содержит повторные статьи')
+    # места начинаются с единицы; первый подходящий id определяет оценку запроса
     rank = next((i for i, value in enumerate(retrieved, 1) if value in case.relevant_ids), None)
     return QueryEvaluation(case, retrieved, rank)
 
 
+# усредняем попадания и обратные места завершённых проверок
 def summarize(results: Sequence[QueryEvaluation]) -> EvaluationSummary:
     if not results:
         raise ValueError('нет завершённых проверок для расчёта метрик')
@@ -131,6 +144,7 @@ def summarize(results: Sequence[QueryEvaluation]) -> EvaluationSummary:
     )
 
 
+# добавляем инструкцию модели и проверяем длину всех ещё не выполненных запросов
 def prepare_queries(
     cases: Sequence[EvaluationQuery], tokenizer: TextTokenizer, raw_query: bool = False,
 ) -> list[tuple[EvaluationQuery, str]]:
@@ -143,6 +157,7 @@ def prepare_queries(
     return prepared
 
 
+# убеждаемся, что ожидаемые статьи уже есть в поисковом индексе
 def validate_expected_articles(store: QdrantClient, name: str, cases: Sequence[EvaluationQuery]) -> None:
     missing: list[int] = []
     for article_id in sorted({value for case in cases for value in case.relevant_ids}):
@@ -155,6 +170,7 @@ def validate_expected_articles(store: QdrantClient, name: str, cases: Sequence[E
         raise ValueError('в индексе отсутствуют ожидаемые статьи: ' + ', '.join(map(str, missing)))
 
 
+# последовательно выполняем запросы и выдаём оценки их результатов
 def evaluate_queries(
     prepared: Sequence[tuple[EvaluationQuery, str]], store: QdrantClient, name: str,
     embeddings: EmbeddingProvider, top_k: int = 5, vector_size: int = VECTOR_SIZE,
@@ -171,6 +187,7 @@ def evaluate_queries(
         yield score_ranking(case, [result.article_id for result in found], top_k)
 
 
+# фиксируем состав, порядок запросов и разметку одним отпечатком
 def query_set_hash(cases: Sequence[EvaluationQuery]) -> str:
     buffer = io.StringIO(newline='')
     writer = csv.writer(buffer)
@@ -179,6 +196,7 @@ def query_set_hash(cases: Sequence[EvaluationQuery]) -> str:
     return hashlib.sha256(buffer.getvalue().encode()).hexdigest()
 
 
+# преобразуем результат проверки в строку csv с настройками запуска
 def report_row(entry: ReportEntry, context: ReportContext) -> list[str | int | float]:
     result = entry.result
     rank = result.first_relevant_rank
@@ -191,6 +209,7 @@ def report_row(entry: ReportEntry, context: ReportContext) -> list[str | int | f
     ]
 
 
+# читаем готовые строки отчёта и проверяем их совместимость и внутреннюю согласованность
 def load_report(
     path: Path, cases: Sequence[EvaluationQuery], context: ReportContext,
 ) -> dict[str, ReportEntry]:
@@ -210,6 +229,7 @@ def load_report(
             case = by_id.get(identifier)
             if case is None or identifier in saved:
                 raise ValueError(f'resume: неизвестный или повторный query_id {identifier}')
+            # готовые проверки можно повторно использовать только с совпадающими настройками
             expected_metadata = {
                 'collection': context.collection, 'collection_points': str(context.collection_points),
                 'query_set_sha256': context.query_set_sha256, 'raw_query': str(context.raw_query),
@@ -226,6 +246,7 @@ def load_report(
                 raise ValueError(f'resume: {identifier}: неверная выдача в отчёте')
             result = score_ranking(case, [int(value) for value in parts], context.top_k)
             rank = str(result.first_relevant_rank) if result.first_relevant_rank is not None else ''
+            # сверяем сохранённые метрики с выдачей, чтобы не принять повреждённую строку
             if row['first_relevant_rank'] != rank or not math.isclose(
                 float(row['reciprocal_rank']), result.reciprocal_rank, rel_tol=1e-12, abs_tol=1e-12,
             ):
@@ -234,6 +255,7 @@ def load_report(
     return saved
 
 
+# настройки оценки, продолжения отчёта и ожидания api
 class CliArgs(argparse.Namespace):
     queries: Path
     output: Path | None
@@ -250,6 +272,7 @@ class CliArgs(argparse.Namespace):
     dry_run: bool
 
 
+# проверяем входные данные, продолжаем нужные запросы, записываем отчёт и считаем метрики
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--queries', type=Path, default=DEFAULT_QUERIES)
@@ -304,6 +327,7 @@ def main() -> int:
             point_count = store.count(name, exact=True).count
             context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k)
             saved = load_report(args.resume, cases, context) if args.resume is not None else {}
+            # оставляем для модели только запросы без готового результата
             pending = [case for case in cases if case.query_id not in saved]
             prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file), args.raw_query) if pending else []
             print(f'из отчёта: {len(saved)}; осталось запросов: {len(pending)}')
@@ -313,6 +337,7 @@ def main() -> int:
                 embedding_config = EmbeddingConfig(read_api_key(), url, deployment, args.timeout_seconds)
             output.parent.mkdir(parents=True, exist_ok=True)
             by_id: dict[str, QueryEvaluation] = {}
+            # файл и клиент закроются даже при исключении или остановке пользователем
             with ExitStack() as stack:
                 report = stack.enter_context(output.open('x', encoding='utf-8', newline=''))
                 if embedding_config is not None:
@@ -328,6 +353,7 @@ def main() -> int:
                         writer.writerow(report_row(entry, context))
                         by_id[case.query_id] = entry.result
                 report.flush()
+                # если все проверки взяты из отчёта, новые векторы вообще не запрашиваются
                 if backend is not None:
                     for result in evaluate_queries(prepared, store, name, backend, args.top_k):
                         rank = result.first_relevant_rank
@@ -359,5 +385,6 @@ def main() -> int:
         parser.exit(1, f'оценка не завершена: {exc}\n')
 
 
+# при прямом запуске выполняем команду; при импорте этот блок пропускается
 if __name__ == '__main__':
     raise SystemExit(main())

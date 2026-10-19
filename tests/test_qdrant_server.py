@@ -16,25 +16,33 @@ from vector_store import QdrantConfig, connect_store
 TEST_URL: str | None = os.environ.get('QDRANT_TEST_URL')
 
 
+# подставной токенизатор делает размер фрагментов предсказуемым в тесте
 class TestTokenizer:
+    # возвращаем границы символов вместо границ настоящих токенов
     def offsets(self, text: str) -> list[tuple[int, int]]:
         return [(i, i + 1) for i in range(len(text))]
 
+    # имитируем учёт двух специальных токенов модели
     def count(self, text: str) -> int:
         return len(text) + 2
 
 
+# подставной клиент выдаёт короткие векторы для проверки серверного qdrant
 class TestEmbeddings:
+    # начинаем подсчёт обращений к подставному клиенту
     def __init__(self) -> None:
         self.calls: int = 0
 
+    # строим короткие векторы из длины текста без вызова удалённой модели
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls += 1
         return [[float(len(text)), 1.0, 2.0] for text in texts]
 
 
+# группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 @unittest.skipUnless(TEST_URL, 'задайте QDRANT_TEST_URL для проверки настоящего сервера')
 class QdrantServerTests(unittest.TestCase):
+    # на настоящем сервере проверяем запись, продолжение, поиск и удаление устаревших точек
     def test_http_index_resume_search_and_stale_cleanup(self) -> None:
         name = f'test_habr_{uuid4().hex}'
         text = 'синтетический текст для проверки ' * 30
@@ -68,5 +76,6 @@ class QdrantServerTests(unittest.TestCase):
                     store.delete_collection(name)
 
 
+# при прямом запуске выполняем тесты этого файла
 if __name__ == '__main__':
     unittest.main()
