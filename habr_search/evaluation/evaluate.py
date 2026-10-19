@@ -14,6 +14,8 @@ from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
+from time import perf_counter
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
@@ -23,6 +25,7 @@ from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError
 from habr_search.ingestion.index import VECTOR_SIZE, EmbeddingProvider, collection_name
 from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
 from habr_search.vector_store import connect_store, resolve_qdrant_config
+from habr_search.index_version import UNVERSIONED, index_revision
 
 from habr_search.paths import PROJECT_ROOT as ROOT
 
@@ -32,7 +35,7 @@ QUERY_COLUMNS: tuple[str, ...] = ('query_id', 'category', 'query', 'relevant_art
 REPORT_COLUMNS: tuple[str, ...] = (
     'started_at', 'collection', 'collection_points', 'query_set_sha256', 'raw_query', 'top_k',
     'query_id', 'category', 'query', 'relevant_article_ids', 'retrieved_article_ids',
-    'first_relevant_rank', 'reciprocal_rank',
+    'first_relevant_rank', 'reciprocal_rank', 'index_revision', 'elapsed_ms',
 )
 
 
@@ -42,7 +45,7 @@ class EvaluationQuery:
     query_id: str  # устойчивое имя проверки для сравнения разных запусков
     category: str  # exact, paraphrase, alias, typo или своя группа
     query: str  # исходный текст, который проверяем поиском
-    relevant_ids: tuple[int, ...]  # известные подходящие статьи; разметка может быть неполной
+    relevant_ids: tuple[int, ...]  # пустой список допустим только для категории no_answer
 
 
 # найденные статьи и место первого подходящего результата для одного запроса
@@ -51,6 +54,7 @@ class QueryEvaluation:
     case: EvaluationQuery  # исходный запрос вместе с его разметкой
     retrieved_ids: tuple[int, ...]  # статьи в порядке выдачи, ограниченные top-k
     first_relevant_rank: int | None  # место первой подходящей статьи или none при отсутствии
+    elapsed_ms: float | None = None  # время модели и поиска; none означает, что длительность не измерялась
 
     # превращаем место в число для mrr: первое место даёт 1, отсутствие даёт 0
     @property
@@ -61,10 +65,12 @@ class QueryEvaluation:
 # итоговые метрики по всем запросам или по одной категории
 @dataclass(frozen=True)
 class EvaluationSummary:
-    count: int  # число завершённых проверок
+    count: int  # число положительных проверок, участвующих в hit и mrr
     hits: int  # сколько запросов нашли подходящую статью в top-k
     hit_rate: float  # доля запросов с подходящей статьёй в первых k результатах
     mrr: float  # среднее обратное место первой подходящей статьи в пределах k
+    negative_count: int = 0  # запросы, для которых в корпусе не ожидается подходящих статей
+    abstentions: int = 0  # отрицательные запросы с пустой выдачей
 
 
 # настройки, которые должны совпасть при продолжении сохранённого отчёта
@@ -75,6 +81,7 @@ class ReportContext:
     query_set_sha256: str  # отпечаток выбранных запросов и разметки
     raw_query: bool  # передаём запрос без добавления инструкции на стороне клиента
     top_k: int  # сколько первых статей учитывается в метриках
+    index_revision: str = UNVERSIONED  # версия содержимого, а не только число точек
 
 
 # результат проверки вместе с временем начала исходного запуска
@@ -104,7 +111,9 @@ def load_queries(path: Path) -> list[EvaluationQuery]:
             if (not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', identifier)
                     or not re.fullmatch(r'[a-z][a-z0-9_-]*', category) or not query):
                 raise ValueError(f'строка {line_number}: проверьте query_id, category и query')
-            parts = [value.strip() for value in ids.split(';')]
+            parts = [value.strip() for value in ids.split(';')] if ids else []
+            if (category == 'no_answer') != (not parts):
+                raise ValueError(f'строка {line_number}: пустые id допустимы только для no_answer')
             if any(not re.fullmatch(r'[1-9][0-9]*', value) for value in parts):
                 raise ValueError(f'строка {line_number}: нужны положительные id статей через ;')
             relevant = tuple(int(value) for value in parts)
@@ -124,6 +133,8 @@ def load_queries(path: Path) -> list[EvaluationQuery]:
 def score_ranking(case: EvaluationQuery, article_ids: Sequence[int], top_k: int) -> QueryEvaluation:
     if top_k < 1:
         raise ValueError('top-k должен быть положительным')
+    if (case.category == 'no_answer') != (not case.relevant_ids):
+        raise ValueError('только no_answer должен иметь пустой список подходящих статей')
     retrieved = tuple(article_ids[:top_k])
     if any(type(value) is not int or value < 1 for value in retrieved):
         raise ValueError('выдача должна содержать положительные id статей')
@@ -138,11 +149,32 @@ def score_ranking(case: EvaluationQuery, article_ids: Sequence[int], top_k: int)
 def summarize(results: Sequence[QueryEvaluation]) -> EvaluationSummary:
     if not results:
         raise ValueError('нет завершённых проверок для расчёта метрик')
-    hits = sum(result.first_relevant_rank is not None for result in results)
+    # отсутствие ответа оцениваем отдельно: оно не уменьшает и не увеличивает hit и mrr
+    positive = [result for result in results if result.case.category != 'no_answer']
+    negative = [result for result in results if result.case.category == 'no_answer']
+    hits = sum(result.first_relevant_rank is not None for result in positive)
     return EvaluationSummary(
-        len(results), hits, hits / len(results),
-        sum(result.reciprocal_rank for result in results) / len(results),
+        len(positive), hits, hits / len(positive) if positive else 0.0,
+        sum(result.reciprocal_rank for result in positive) / len(positive) if positive else 0.0,
+        len(negative), sum(not result.retrieved_ids for result in negative),
     )
+
+
+def print_summary(results: Sequence[QueryEvaluation], top_k: int, label: str = '') -> None:
+    """показываем поиск ответа и отказ от нерелевантной выдачи разными показателями."""
+    summary = summarize(results)
+    prefix = f'{label}: ' if label else ''
+    if summary.count:
+        print(f'{prefix}Hit@{top_k}: {summary.hit_rate:.2%} ({summary.hits}/{summary.count})')
+        print(f'{prefix}MRR@{top_k}: {summary.mrr:.4f}')
+    if summary.negative_count:
+        print(f'{prefix}no_answer: пустая выдача {summary.abstentions}/{summary.negative_count}; '
+              f'непустая выдача {summary.negative_count - summary.abstentions}/{summary.negative_count}')
+    # время включает подготовленные запросы к модели и qdrant, но не ввод ключа и загрузку токенизатора
+    times = sorted(result.elapsed_ms for result in results if result.elapsed_ms is not None)
+    if times:
+        p95 = times[max(0, math.ceil(len(times) * 0.95) - 1)]
+        print(f'{prefix}время запроса: медиана {median(times):.0f} мс; p95 {p95:.0f} мс')
 
 
 # добавляем инструкцию модели и проверяем длину всех ещё не выполненных запросов
@@ -175,17 +207,26 @@ def validate_expected_articles(store: QdrantClient, name: str, cases: Sequence[E
 def evaluate_queries(
     prepared: Sequence[tuple[EvaluationQuery, str]], store: QdrantClient, name: str,
     embeddings: EmbeddingProvider, top_k: int = 5, vector_size: int = VECTOR_SIZE,
+    *, expected_revision: str | None = None,
 ) -> Iterator[QueryEvaluation]:
     if top_k < 1:
         raise ValueError('top-k должен быть положительным')
+    revision = expected_revision if expected_revision is not None else index_revision(store, name)
     for case, text in prepared:
+        if index_revision(store, name) != revision:
+            raise ValueError('версия индекса изменилась; оценка остановлена до следующего обращения к модели')
+        started = perf_counter()
         # каждый запрос векторизуется один раз, статьи повторно не обрабатываются
         try:
             vector = embeddings.embed([text])[0]
         except EmbeddingAPIError as exc:
             raise EmbeddingAPIError(f'{case.query_id}: {exc}') from None
         found = search_articles(store, name, vector, top_k, vector_size)
-        yield score_ranking(case, [result.article_id for result in found], top_k)
+        if index_revision(store, name) != revision:
+            raise ValueError('индекс изменился во время запроса; результат не записан')
+        result = score_ranking(case, [item.article_id for item in found], top_k)
+        yield QueryEvaluation(case, result.retrieved_ids, result.first_relevant_rank,
+                              (perf_counter() - started) * 1000)
 
 
 # фиксируем состав, порядок запросов и разметку одним отпечатком
@@ -207,6 +248,7 @@ def report_row(entry: ReportEntry, context: ReportContext) -> list[str | int | f
         result.case.query_id, result.case.category, result.case.query,
         ';'.join(map(str, result.case.relevant_ids)), ';'.join(map(str, result.retrieved_ids)),
         rank if rank is not None else '', result.reciprocal_rank,
+        context.index_revision, '' if result.elapsed_ms is None else result.elapsed_ms,
     ]
 
 
@@ -221,7 +263,7 @@ def load_report(
         rows = csv.reader(source, strict=True)
         header = next(rows, None)
         if header is None or tuple(header) != REPORT_COLUMNS:
-            raise ValueError('resume: неверный или отсутствующий заголовок отчёта')
+            raise ValueError('resume: неверный формат отчёта; новый формат содержит версию индекса и время запроса')
         for number, values in enumerate(rows, 2):
             if len(values) != len(REPORT_COLUMNS):
                 raise ValueError(f'resume: строка {number} неполная; исходный отчёт не изменён')
@@ -236,6 +278,7 @@ def load_report(
                 'query_set_sha256': context.query_set_sha256, 'raw_query': str(context.raw_query),
                 'top_k': str(context.top_k), 'category': case.category, 'query': case.query,
                 'relevant_article_ids': ';'.join(map(str, case.relevant_ids)),
+                'index_revision': context.index_revision,
             }
             if any(row[key] != value for key, value in expected_metadata.items()):
                 raise ValueError(f'resume: {identifier}: настройки, индекс или набор запросов отличаются от отчёта')
@@ -246,6 +289,10 @@ def load_report(
             if len(parts) > context.top_k or any(not re.fullmatch(r'[1-9][0-9]*', value) for value in parts):
                 raise ValueError(f'resume: {identifier}: неверная выдача в отчёте')
             result = score_ranking(case, [int(value) for value in parts], context.top_k)
+            elapsed = float(row['elapsed_ms']) if row['elapsed_ms'] else None
+            if elapsed is not None and (not math.isfinite(elapsed) or elapsed < 0):
+                raise ValueError(f'resume: {identifier}: неверное время запроса')
+            result = QueryEvaluation(case, result.retrieved_ids, result.first_relevant_rank, elapsed)
             rank = str(result.first_relevant_rank) if result.first_relevant_rank is not None else ''
             # сверяем сохранённые метрики с выдачей, чтобы не принять повреждённую строку
             if row['first_relevant_rank'] != rank or not math.isclose(
@@ -326,7 +373,8 @@ def main() -> int:
             validate_collection(store, name)
             validate_expected_articles(store, name, cases)
             point_count = store.count(name, exact=True).count
-            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k)
+            revision = index_revision(store, name)
+            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k, revision)
             saved = load_report(args.resume, cases, context) if args.resume is not None else {}
             # оставляем для модели только запросы без готового результата
             pending = [case for case in cases if case.query_id not in saved]
@@ -356,24 +404,27 @@ def main() -> int:
                 report.flush()
                 # если все проверки взяты из отчёта, новые векторы вообще не запрашиваются
                 if backend is not None:
-                    for result in evaluate_queries(prepared, store, name, backend, args.top_k):
+                    if index_revision(store, name) != revision:
+                        raise ValueError('версия индекса изменилась до начала оценки')
+                    for result in evaluate_queries(prepared, store, name, backend, args.top_k,
+                                                   expected_revision=revision):
                         rank = result.first_relevant_rank
                         writer.writerow(report_row(ReportEntry(started.isoformat(), result), context))
                         report.flush()  # при ошибке уже завершённые проверки останутся в отчёте
                         by_id[result.case.query_id] = result
-                        position = str(rank) if rank is not None else f'нет в первых {args.top_k}'
-                        print(f'{len(by_id)}/{len(cases)} {result.case.query_id}: место {position}')
+                        if result.case.category == 'no_answer':
+                            position = 'пустая выдача' if not result.retrieved_ids else 'возвращены статьи'
+                        else:
+                            position = f'место {rank}' if rank is not None else f'нет в первых {args.top_k}'
+                        print(f'{len(by_id)}/{len(cases)} {result.case.query_id}: {position}')
             # при изменении индекса во время проверки сводка уже не сопоставима
-            if store.count(name, exact=True).count != point_count:
-                raise ValueError('число фрагментов изменилось во время оценки; повторите на неизменном индексе')
+            if store.count(name, exact=True).count != point_count or index_revision(store, name) != revision:
+                raise ValueError('индекс изменился во время оценки; повторите на неизменном индексе')
         results = [by_id[case.query_id] for case in cases]
-        summary = summarize(results)
-        print(f'завершено запросов: {summary.count}')
-        print(f'Hit@{args.top_k}: {summary.hit_rate:.2%} ({summary.hits}/{summary.count})')
-        print(f'MRR@{args.top_k}: {summary.mrr:.4f}')
+        print(f'завершено запросов: {len(results)}')
+        print_summary(results, args.top_k)
         for category in sorted({result.case.category for result in results}):
-            group = summarize([result for result in results if result.case.category == category])
-            print(f'{category}: запросов {group.count}; Hit@{args.top_k} {group.hit_rate:.2%}; MRR@{args.top_k} {group.mrr:.4f}')
+            print_summary([result for result in results if result.case.category == category], args.top_k, category)
         return 0
     except KeyboardInterrupt:
         print('\nоценка остановлена; завершённые строки отчёта сохранены, итоговые метрики не рассчитаны')

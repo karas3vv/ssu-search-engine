@@ -13,7 +13,7 @@ from pathlib import Path
 from habr_search.retrieval import spelling
 from habr_search.evaluation.evaluate import (
     QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, QueryEvaluation, ReportContext,
-    load_queries, load_report, query_set_hash, summarize,
+    load_queries, load_report, query_set_hash, print_summary,
 )
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, SpellingDictionary, load_dictionary
 
@@ -111,9 +111,9 @@ def read_complete_report(path: Path, cases: Sequence[EvaluationQuery]) -> tuple[
     if values['raw_query'] not in ('True', 'False'):
         raise ValueError('неверный режим инструкции в отчёте')
     context = ReportContext(values['collection'], int(values['collection_points']), query_set_hash(cases),
-                            values['raw_query'] == 'True', int(values['top_k']))
-    if context.collection_points < 1 or context.top_k < 1:
-        raise ValueError('неверное число точек или top-k')
+                            values['raw_query'] == 'True', int(values['top_k']), values['index_revision'])
+    if context.collection_points < 1 or context.top_k < 1 or not context.index_revision:
+        raise ValueError('неверное число точек, top-k или версия индекса')
     entries = load_report(path, cases, context)
     if len(entries) != len(cases):
         raise ValueError('сравнение требует полностью завершённых отчётов')
@@ -133,19 +133,23 @@ def compare_reports(original_queries: Path, corrected_queries: Path,
     if replace(before_context, query_set_sha256=after_context.query_set_sha256) != after_context:
         raise ValueError('коллекция, число точек, top-k или инструкция в отчётах отличаются')
     for label, results in [('исходные', before), ('с исправлениями', after)]:
-        total = summarize(results)
-        print(f'{label}: Hit@{before_context.top_k} {total.hit_rate:.2%}; MRR@{before_context.top_k} {total.mrr:.4f}')
+        print_summary(results, before_context.top_k, label)
         for category in sorted({result.case.category for result in results}):
-            group = summarize([result for result in results if result.case.category == category])
-            print(f'  {category}: запросов {group.count}; Hit@{before_context.top_k} {group.hit_rate:.2%}; '
-                  f'MRR@{before_context.top_k} {group.mrr:.4f}')
+            print_summary([result for result in results if result.case.category == category],
+                          before_context.top_k, f'  {category}')
     improved = worse = unchanged = 0
     for old, new in zip(before, after):
-        improved += new.reciprocal_rank > old.reciprocal_rank
-        worse += new.reciprocal_rank < old.reciprocal_rank
-        unchanged += new.reciprocal_rank == old.reciprocal_rank
-        if new.reciprocal_rank != old.reciprocal_rank:
-            print(f'{old.case.query_id}: место {old.first_relevant_rank} → {new.first_relevant_rank}')
+        # для no_answer улучшением считается пустая выдача, а не место ожидаемой статьи
+        old_value = float(not old.retrieved_ids) if old.case.category == 'no_answer' else old.reciprocal_rank
+        new_value = float(not new.retrieved_ids) if new.case.category == 'no_answer' else new.reciprocal_rank
+        improved += new_value > old_value
+        worse += new_value < old_value
+        unchanged += new_value == old_value
+        if new_value != old_value:
+            if old.case.category == 'no_answer':
+                print(f'{old.case.query_id}: пустая выдача {not old.retrieved_ids} → {not new.retrieved_ids}')
+            else:
+                print(f'{old.case.query_id}: место {old.first_relevant_rank} → {new.first_relevant_rank}')
     print(f'лучше: {improved}; хуже: {worse}; одинаково: {unchanged}')
 
 
