@@ -1,0 +1,17 @@
+query_id,category,query,relevant_article_ids
+max_webhooks_exact,exact,Почему реальные вебхуки MAX API отличаются от Telegram Bot API?,1005282
+max_webhooks_paraphrase,paraphrase,"Как перестать ошибаться при разборе входящих сообщений бота, если документация не совпадает с реальными JSON-запросами?",1005282
+max_webhooks_alias,alias,Где в апдейте Макса находится текст сообщения и чем callback отличается от Телеги?,1005282
+max_webhooks_typo,typo,Где находится текст сообщния в вебхуках MAX и как устроены inline-кнопки?,1005282
+nuitka_analysis_exact,exact,"Как DeNuitkanizator анализирует exe-файлы, собранные Nuitka?",1048908
+nuitka_analysis_paraphrase,paraphrase,"Как извлечь строки, пути и сведения о компиляторе из исполняемого файла Python без восстановления исходного кода?",1048908
+nuitka_analysis_alias,alias,"Как посмотреть метаданные экзешника, собранного Ньюткой из питона?",1048908
+nuitka_analysis_typo,typo,"Как анализировать EXE, собранный Nuitak, и извлечь имена модулей?",1048908
+p2p_sync_exact,exact,Какие ограничения есть у P2P-синхронизации WardLink по LAN без сервера?,1052502
+p2p_sync_paraphrase,paraphrase,"Почему два соседних устройства не могут синхронизироваться через локальную сеть, если подключены к разным роутерам?",1052502
+p2p_sync_alias,alias,Как рассинхрон часов влияет на выбор последнего изменения при peer-to-peer синхронизации избранного?,1052502
+p2p_sync_typo,typo,Почему P2P-синхронизаця без сервера зависит от общей локальной сети?,1052502
+cloud_functions_exact,exact,Как развернуть Google Cloud Function с HTTP endpoint через GitHub Actions?,1053330
+cloud_functions_paraphrase,paraphrase,Как сделать небольшой серверный обработчик отправки писем с формы без аренды и обслуживания виртуального сервера?,1053330
+cloud_functions_alias,alias,Как задеплоить бессерверный бэкенд в GCP с помощью CI на Гитхабе?,1053330
+cloud_functions_typo,typo,Как задеплоить Google Cloud Functons через GitHub Actons?,1053330
