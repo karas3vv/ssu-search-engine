@@ -27,7 +27,7 @@ class SearchResult:
     title: str
     url: str
     text: str
-    score: float  # косинусное сходство, а не вероятность правильного ответа
+    score: float  # оценка алгоритма поиска, а не вероятность правильного ответа
 
 
 def build_query(query: str, raw: bool = False) -> str:
