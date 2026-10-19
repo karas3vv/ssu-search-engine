@@ -168,7 +168,9 @@ def print_summary(results: Sequence[QueryEvaluation], top_k: int, label: str = '
         print(f'{prefix}Hit@{top_k}: {summary.hit_rate:.2%} ({summary.hits}/{summary.count})')
         print(f'{prefix}MRR@{top_k}: {summary.mrr:.4f}')
     if summary.negative_count:
-        print(f'{prefix}no_answer: пустая выдача {summary.abstentions}/{summary.negative_count}; '
+        # название категории уже служит подписью показателя и не должно повторяться
+        negative_label = prefix if label.strip() == 'no_answer' else f'{prefix}no_answer: '
+        print(f'{negative_label}пустая выдача {summary.abstentions}/{summary.negative_count}; '
               f'непустая выдача {summary.negative_count - summary.abstentions}/{summary.negative_count}')
     # время включает подготовленные запросы к модели и qdrant, но не ввод ключа и загрузку токенизатора
     times = sorted(result.elapsed_ms for result in results if result.elapsed_ms is not None)
