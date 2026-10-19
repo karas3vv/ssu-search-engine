@@ -6,7 +6,6 @@ const message = /** @type {HTMLElement} */ (document.getElementById('message'));
 const suggestion = /** @type {HTMLElement} */ (document.getElementById('suggestion'));
 const results = /** @type {HTMLOListElement} */ (document.getElementById('results'));
 const section = /** @type {HTMLElement} */ (document.getElementById('results-section'));
-const usedQuery = /** @type {HTMLElement} */ (document.getElementById('used-query'));
 let pending = false;
 
 // примеры меняются только в пустом неактивном поле и не запускают поиск
@@ -90,45 +89,37 @@ document.querySelectorAll('[data-query]').forEach(button => button.addEventListe
   query.value = button.getAttribute('data-query') || ''; query.dispatchEvent(new Event('input')); query.focus();
 }));
 
-// показываем только предложенные варианты, которые не применились автоматически
-/** @param {Record<string, string[]>} alternatives */
-function showAlternatives(alternatives) {
-  const entries = Object.entries(alternatives);
+// исправление становится новым запросом только после нажатия на предложение
+/** @param {string} originalQuery @param {string | null} suggestedQuery */
+function showSuggestion(originalQuery, suggestedQuery) {
   suggestion.replaceChildren();
-  suggestion.hidden = entries.length === 0;
-  if (entries.length) {
-    suggestion.textContent = entries.map(([word, options]) => `Варианты написания «${word}»: ${options.join(', ')}.`).join(' ');
-  }
+  suggestion.hidden = !suggestedQuery || query.value.trim() !== originalQuery.trim();
+  if (suggestion.hidden) return;
+  suggestion.append(document.createTextNode('Возможно, вы имели в виду: '));
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'text-button spelling-query';
+  button.textContent = suggestedQuery;
+  button.addEventListener('click', () => {
+    if (pending) return;
+    query.value = suggestedQuery || originalQuery;
+    query.dispatchEvent(new Event('input'));
+    void runSearch(query.value);
+  });
+  suggestion.append(button);
 }
 
-// исходная фраза захватывается из ответа, чтобы отмена исправления не зависела от новых правок поля
-/** @param {string} text @param {boolean} [applyCorrections] */
-async function runSearch(text, applyCorrections = true) {
+// каждый поиск использует введённый текст и делает ровно один запрос к модели
+/** @param {string} text */
+async function runSearch(text) {
   if (pending) return;
   if (!text.trim()) { query.focus(); return; }
   pending = true; searchButton.disabled = true; results.setAttribute('aria-busy', 'true');
   section.hidden = true; suggestion.hidden = true;
   status('Ищем статьи…', 'loading');
   try {
-    // проверка доступности словаря локальная и не вызывает модель
-    const available = applyCorrections ? await updateHealth() : false;
-    const value = await api('/api/search', {query: text, top_k: 5, correct_typos: available});
+    const value = await api('/api/search', {query: text, top_k: 5, correct_typos: false});
     results.replaceChildren(...value.results.map(article)); section.hidden = false;
-    usedQuery.replaceChildren(); usedQuery.hidden = !value.corrected;
-    if (value.corrected) {
-      usedQuery.append(document.createTextNode(`Показаны результаты для: ${value.used_query} `));
-      const original = document.createElement('button');
-      original.type = 'button'; original.className = 'text-button original-query';
-      original.textContent = 'Искать исходный запрос';
-      original.title = value.original_query;
-      original.addEventListener('click', () => {
-        query.value = value.original_query;
-        query.dispatchEvent(new Event('input'));
-        void runSearch(value.original_query, false);
-      });
-      usedQuery.append(original);
-    }
-    showAlternatives(value.alternatives || {});
+    showSuggestion(text, value.suggested_query || null);
     status(value.results.length ? '' : 'Подходящих статей не найдено. Попробуйте уточнить запрос.');
   } catch (error) {
     status(error instanceof Error ? error.message : 'Не удалось выполнить поиск. Проверьте соединение и повторите запрос.', 'error');
@@ -139,14 +130,13 @@ form?.addEventListener('submit', event => {
   event.preventDefault(); void runSearch(query.value.trim());
 });
 
-// обновляем число статей и узнаём, загружен ли словарь исправлений
-/** @returns {Promise<boolean>} */
+// показываем число статей при открытии страницы без обращения к модели
+/** @returns {Promise<void>} */
 async function updateHealth() {
   const value = await api('/api/health');
   const count = /** @type {HTMLElement} */ (document.getElementById('article-count'));
   count.textContent = value.articles ? `${value.articles} ${plural(value.articles, ['статья', 'статьи', 'статей'])}` : '';
   count.hidden = !value.articles;
-  return value.spelling_available;
 }
 
 updateHealth().catch(() => { /* ошибка будет показана при попытке поиска */ });

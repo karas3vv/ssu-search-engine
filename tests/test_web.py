@@ -61,6 +61,7 @@ class WebTests(unittest.TestCase):
                     value = response.json()
                     self.assertEqual(value['used_query'], 'python' if apply else 'pyhton')
                     self.assertEqual(value['corrected'], apply)
+                    self.assertEqual(value['suggested_query'], None if apply else 'python')
                     self.assertEqual(len(value['results']), 2)
                     self.assertLessEqual(len(value['results'][0]['snippet']), 501)
                     self.assertIn('<img', value['results'][0]['title'])
@@ -128,23 +129,52 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.get('/api/health', headers={'Host': 'unrelated.example'}).status_code, 400)
                 self.assertEqual(embeddings.calls, [])
 
-    # интерфейс применяет исправление явно, а повторный запрос может отменить его один раз
-    def test_corrected_search_and_original_retry_send_exactly_one_query_each(self) -> None:
+    # сначала ищем введённую фразу; выбранная подсказка требует второго явного запроса
+    def test_suggested_query_search_requires_second_explicit_request(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
             with TestClient(create_app(lambda: service)) as client:
-                corrected = client.post('/api/search', json={'query': 'pyhton', 'correct_typos': True}).json()
-                self.assertEqual(corrected['used_query'], 'python')
-                self.assertEqual(corrected['original_query'], 'pyhton')
-                self.assertEqual(corrected['alternatives'], {})
-                original = client.post('/api/search', json={
-                    'query': corrected['original_query'], 'correct_typos': False,
-                }).json()
+                original = client.post('/api/search', json={'query': 'pyhton'}).json()
                 self.assertEqual(original['used_query'], 'pyhton')
+                self.assertEqual(original['suggested_query'], 'python')
                 self.assertFalse(original['corrected'])
+                self.assertEqual(len(embeddings.calls), 1)
+                selected = client.post('/api/search', json={
+                    'query': original['suggested_query'], 'correct_typos': False,
+                }).json()
+                self.assertEqual(selected['used_query'], 'python')
+                self.assertIsNone(selected['suggested_query'])
+                self.assertFalse(selected['corrected'])
                 self.assertEqual(len(embeddings.calls), 2)
-                self.assertTrue(embeddings.calls[0][0].endswith('<query>python'))
-                self.assertTrue(embeddings.calls[1][0].endswith('<query>pyhton'))
+                self.assertTrue(embeddings.calls[0][0].endswith('<query>pyhton'))
+                self.assertTrue(embeddings.calls[1][0].endswith('<query>python'))
+
+    # даже ложный вариант для редкого названия не меняет исходный поисковый запрос
+    def test_rare_technology_name_is_only_suggested_and_never_silently_replaced(self) -> None:
+        with closing(QdrantClient(location=':memory:')) as store:
+            service, embeddings = make_service(store)
+            words = {'стора': 3, 'спринга': 3}
+            service.dictionary = SpellingDictionary(words, DictionaryInfo(
+                'test', 3, 3, dictionary_hash(words), '2026-10-19T00:00:00+00:00',
+            ))
+            with TestClient(create_app(lambda: service)) as client:
+                result = client.post('/api/search', json={'query': 'Ктора без Спринга'}).json()
+                self.assertEqual(result['used_query'], 'Ктора без Спринга')
+                self.assertEqual(result['suggested_query'], 'Стора без Спринга')
+                self.assertFalse(result['corrected'])
+                self.assertEqual(len(embeddings.calls), 1)
+                self.assertTrue(embeddings.calls[0][0].endswith('<query>Ктора без Спринга'))
+
+    # при явном расхождении словаря и индекса доступен поиск исходной фразы без подсказок
+    def test_changed_point_count_disables_suggestions_for_original_search(self) -> None:
+        with closing(QdrantClient(location=':memory:')) as store:
+            service, embeddings = make_service(store)
+            with TestClient(create_app(lambda: service)) as client:
+                store.delete('test', [3], wait=True)
+                result = client.post('/api/search', json={'query': 'pyhton'}).json()
+                self.assertEqual(result['used_query'], 'pyhton')
+                self.assertIsNone(result['suggested_query'])
+                self.assertEqual(len(embeddings.calls), 1)
 
     # неоднозначные варианты показываются пользователю без изменения поисковой фразы
     def test_ambiguous_words_are_returned_as_suggestions_and_not_applied(self) -> None:

@@ -60,13 +60,14 @@ class ArticleResponse(BaseModel):
     score: float
 
 
-# возвращаем использованную фразу, найденные статьи и неприменённые варианты
+# возвращаем выдачу исходной фразы и отдельное предложение, которое пользователь может выбрать
 class SearchResponse(BaseModel):
     original_query: str
     used_query: str
     corrected: bool
     results: list[ArticleResponse]
     elapsed_ms: float
+    suggested_query: str | None = None
     alternatives: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -132,7 +133,7 @@ class SearchService:
                                   alternatives={item.original: [candidate.word for candidate in item.candidates]
                                                 for item in result.suggestions})
 
-    # проверяем запрос, исправляем допустимые опечатки и получаем один вектор для поиска
+    # ищем исходную фразу и отдельно предлагаем исправление; замена требует явного флага api
     def search(self, request: SearchRequest) -> SearchResponse:
         if not self.lock.acquire(blocking=False):
             raise SearchBusyError('поиск уже выполняется; дождитесь результата')
@@ -141,12 +142,24 @@ class SearchService:
             validate_collection(self.store, self.name)
             query = request.query.strip()
             alternatives: dict[str, list[str]] = {}
-            if request.correct_typos:
-                if self.dictionary is None:
-                    raise ValueError('словарь опечаток не загружен')
-                self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count)
+            suggested_query: str | None = None
+            dictionary_available = self.dictionary is not None
+            if self.dictionary is not None:
+                try:
+                    self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count)
+                except ValueError:
+                    # устаревший словарь не мешает искать исходную фразу, но не даёт подсказок
+                    if request.correct_typos:
+                        raise
+                    dictionary_available = False
+            if request.correct_typos and not dictionary_available:
+                raise ValueError('словарь опечаток не загружен')
+            if self.dictionary is not None and dictionary_available:
                 spelling = self.dictionary.suggest(query)
-                query = spelling.corrected
+                if request.correct_typos:
+                    query = spelling.corrected
+                elif spelling.corrected != query:
+                    suggested_query = spelling.corrected
                 # неприменённые варианты показываем отдельно, не меняя ими запрос
                 alternatives = {item.original: [candidate.word for candidate in item.candidates]
                                 for item in spelling.suggestions if item.replacement is None}
@@ -164,7 +177,7 @@ class SearchService:
                                                snippet=snippet, score=item.score))
             return SearchResponse(original_query=request.query, used_query=query, corrected=query != request.query.strip(),
                                   results=results, elapsed_ms=round((perf_counter() - start) * 1000, 1),
-                                  alternatives=alternatives)
+                                  alternatives=alternatives, suggested_query=suggested_query)
         finally:
             self.lock.release()
 

@@ -223,12 +223,6 @@ input::placeholder{
   letter-spacing:-.4px;
   margin:0
 }
-.used-query{
-  font-size:13px;
-  color:var(--muted);
-  line-height:1.6;
-  margin:10px 0 20px
-}
 .results{
   list-style:none;
   padding:0;
@@ -336,9 +330,8 @@ input::placeholder{
     transition:none!important
   }
 }
-/* ссылка позволяет отменить исправление для одного запроса */
-.original-query {
-  margin-left: 6px;
+/* предложение исправления выглядит как ссылка и доступно с клавиатуры */
+.spelling-query {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
