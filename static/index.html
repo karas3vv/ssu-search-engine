@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Поиск по Хабру</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="header">
+    <a class="brand" href="/" aria-label="поиск по Хабру — главная"><span class="brand-mark" aria-hidden="true">х</span> Хабр <span class="brand-separator">/</span> поиск</a>
+    <span id="index-status" class="index-status">Проверяем индекс…</span>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">ПОИСК ПО СМЫСЛУ</p>
+      <h1 id="page-title">Найдите статью,<br>которую помните.</h1>
+      <p class="lead">Опишите задачу своими словами — найдём подходящие статьи в собранном корпусе Хабра.</p>
+    </section>
+    <form id="search-form" class="search-panel">
+      <label class="sr-only" for="query">Что вы хотите найти?</label>
+      <div class="search-row">
+        <svg class="search-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="query" type="search" name="query" placeholder="Например, как создавать отчёты Word из Excel" maxlength="4000" required autocomplete="off">
+        <button id="search-button" class="primary" type="submit">Найти <span aria-hidden="true">↗</span></button>
+      </div>
+      <div class="search-options">
+        <label class="checkbox"><input id="correct-typos" type="checkbox"> Исправлять опечатки</label>
+        <button id="check-spelling" class="text-button" type="button">Проверить запрос</button>
+      </div>
+      <div id="suggestion" class="suggestion" hidden aria-live="polite"></div>
+    </form>
+    <div class="examples" aria-label="примеры запросов"><span>Попробуйте:</span>
+      <button type="button" data-query="Как автоматически создавать отчёты Word из Excel на Python?">Отчёты без рутины</button>
+      <button type="button" data-query="Как сохранить страницу в PDF с текстом и ссылками?">Страница в PDF</button>
+      <button type="button" data-query="Почему больше ядер не всегда ускоряют программу?">Предел ускорения</button>
+    </div>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <section id="results-section" class="results-section" hidden aria-labelledby="results-title">
+      <div class="results-heading"><h2 id="results-title">Найденные статьи</h2><span id="result-count"></span></div>
+      <p id="used-query" class="used-query"></p>
+      <ol id="results" class="results"></ol>
+    </section>
+    <div id="empty-state" class="empty-state"><span class="empty-symbol" aria-hidden="true">↗</span><div><strong>От вопроса — к статье</strong><p>В результатах появятся ссылки и фрагменты, подходящие к вашей задаче.</p></div></div>
+  </main>
+  <footer>Учебный поисковый движок <span aria-hidden="true">·</span> Статьи открываются на Хабре</footer>
+</body>
+</html>

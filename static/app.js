@@ -1,0 +1,110 @@
+// элементы страницы не хранят ключ модели и не отправляют поиск при вводе текста
+const form = document.getElementById('search-form');
+const query = /** @type {HTMLInputElement} */ (document.getElementById('query'));
+const correctTypos = /** @type {HTMLInputElement} */ (document.getElementById('correct-typos'));
+const searchButton = /** @type {HTMLButtonElement} */ (document.getElementById('search-button'));
+const checkButton = /** @type {HTMLButtonElement} */ (document.getElementById('check-spelling'));
+const message = /** @type {HTMLElement} */ (document.getElementById('message'));
+const suggestion = /** @type {HTMLElement} */ (document.getElementById('suggestion'));
+const results = /** @type {HTMLOListElement} */ (document.getElementById('results'));
+const section = /** @type {HTMLElement} */ (document.getElementById('results-section'));
+let pending = false;
+let suggestionVersion = 0;
+
+/** @param {string} text @param {string} [kind] */
+function status(text, kind = '') { message.textContent = text; message.className = `message ${kind}`; }
+
+/** @param {number} count @param {string[]} forms */
+function plural(count, forms) {
+  const rest = count % 100;
+  if (rest >= 11 && rest <= 14) return forms[2];
+  const last = count % 10;
+  return last === 1 ? forms[0] : last >= 2 && last <= 4 ? forms[1] : forms[2];
+}
+
+/** @param {string} path @param {object | undefined} [body] @returns {Promise<any>} */
+async function api(path, body) {
+  let response;
+  try {
+    response = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+  } catch { throw new Error('Не удалось связаться с сервером поиска. Проверьте, запущен ли он.'); }
+  let value;
+  try { value = await response.json(); }
+  catch { throw new Error('Сервер вернул неожиданный ответ. Проверьте терминал сервера.'); }
+  if (!response.ok) throw new Error(typeof value.detail === 'string' ? value.detail : 'Проверьте текст и параметры запроса.');
+  return value;
+}
+
+// текст статьи вставляется как текст, а не как разметка из внешнего источника
+/** @param {{article_id:number,title:string,url:string,snippet:string,score:number}} item @param {number} index */
+function article(item, index) {
+  const card = document.createElement('li'); card.className = 'result';
+  const top = document.createElement('div'); top.className = 'result-top';
+  const number = document.createElement('span'); number.className = 'result-number'; number.textContent = String(index + 1).padStart(2, '0');
+  const source = document.createElement('span'); source.textContent = 'ХАБР · СТАТЬЯ';
+  const score = document.createElement('span'); score.className = 'score'; score.textContent = `сходство ${item.score.toFixed(4)}`;
+  top.append(number, source, score);
+  const heading = document.createElement('h3');
+  const link = document.createElement('a'); link.textContent = item.title;
+  try {
+    const url = new URL(item.url);
+    if (url.protocol === 'https:' && url.hostname === 'habr.com') {
+      link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    }
+  } catch { /* некорректный адрес остаётся обычным текстом */ }
+  heading.append(link);
+  const snippet = document.createElement('p'); snippet.textContent = item.snippet;
+  card.append(top, heading, snippet); return card;
+}
+
+query.addEventListener('input', () => { suggestionVersion++; suggestion.hidden = true; });
+document.querySelectorAll('[data-query]').forEach(button => button.addEventListener('click', () => {
+  query.value = button.getAttribute('data-query') || ''; query.dispatchEvent(new Event('input')); query.focus();
+}));
+
+checkButton.addEventListener('click', async () => {
+  const text = query.value.trim();
+  if (!text) { query.focus(); return; }
+  const version = ++suggestionVersion; checkButton.disabled = true;
+  try {
+    const value = await api('/api/suggest', {query: text});
+    if (version !== suggestionVersion) return;
+    suggestion.replaceChildren(); suggestion.hidden = false;
+    if (!value.available) { suggestion.textContent = 'Словарь опечаток не загружен.'; return; }
+    if (value.corrected_query !== value.original_query) {
+      suggestion.append(document.createTextNode('Возможно, вы имели в виду: '));
+      const apply = document.createElement('button'); apply.type = 'button'; apply.textContent = value.corrected_query;
+      apply.addEventListener('click', () => { query.value = value.corrected_query; query.dispatchEvent(new Event('input')); query.focus(); });
+      suggestion.append(apply);
+    } else {
+      const entries = Object.entries(value.alternatives);
+      suggestion.textContent = entries.length ? `Варианты для проверки: ${entries.map(([word, options]) => `${word} → ${/** @type {string[]} */ (options).join(', ')}`).join('; ')}. Запрос сохранён.` : 'Однозначных исправлений не найдено. Запрос сохранён.';
+    }
+  } catch (error) { status(error instanceof Error ? error.message : 'Не удалось проверить запрос.', 'error'); }
+  finally { checkButton.disabled = false; }
+});
+
+form?.addEventListener('submit', async event => {
+  event.preventDefault(); if (pending) return;
+  const text = query.value.trim(); if (!text) { query.focus(); return; }
+  pending = true; searchButton.disabled = true; results.setAttribute('aria-busy', 'true');
+  section.hidden = true;
+  /** @type {HTMLElement} */ (document.getElementById('empty-state')).hidden = true;
+  status('Ищем подходящие статьи. Ответ модели может занять некоторое время…', 'loading');
+  try {
+    const value = await api('/api/search', {query: text, top_k: 5, correct_typos: correctTypos.checked});
+    results.replaceChildren(...value.results.map(article)); section.hidden = false;
+    /** @type {HTMLElement} */ (document.getElementById('result-count')).textContent = `${value.results.length} ${plural(value.results.length, ['статья', 'статьи', 'статей'])} · ${(value.elapsed_ms / 1000).toFixed(1)} с`;
+    /** @type {HTMLElement} */ (document.getElementById('used-query')).textContent = `${value.corrected ? 'После исправления: ' : 'По запросу: '}${value.used_query}`;
+    status(value.results.length ? '' : 'Подходящих статей не найдено. Попробуйте уточнить запрос.');
+  } catch (error) {
+    status(error instanceof Error ? error.message : 'Не удалось выполнить поиск. Проверьте соединение и повторите запрос.', 'error');
+  } finally { pending = false; searchButton.disabled = false; results.removeAttribute('aria-busy'); }
+});
+
+api('/api/health').then(value => {
+  /** @type {HTMLElement} */ (document.getElementById('index-status')).textContent = `${value.articles ? `${value.articles} ${plural(value.articles, ['статья', 'статьи', 'статей'])} · ` : ''}${value.fragments} ${plural(value.fragments, ['фрагмент', 'фрагмента', 'фрагментов'])}`;
+  correctTypos.disabled = !value.spelling_available; checkButton.disabled = !value.spelling_available;
+}).catch(() => { /** @type {HTMLElement} */ (document.getElementById('index-status')).textContent = 'Индекс недоступен'; });
