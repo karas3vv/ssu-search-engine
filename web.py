@@ -63,6 +63,7 @@ class SearchResponse(BaseModel):
     corrected: bool
     results: list[ArticleResponse]
     elapsed_ms: float
+    alternatives: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
@@ -125,11 +126,16 @@ class SearchService:
             start = perf_counter()
             validate_collection(self.store, self.name)
             query = request.query.strip()
+            alternatives: dict[str, list[str]] = {}
             if request.correct_typos:
                 if self.dictionary is None:
                     raise ValueError('словарь опечаток не загружен')
                 self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count)
-                query = self.dictionary.suggest(query).corrected
+                spelling = self.dictionary.suggest(query)
+                query = spelling.corrected
+                # неприменённые варианты показываем отдельно, не меняя ими запрос
+                alternatives = {item.original: [candidate.word for candidate in item.candidates]
+                                for item in spelling.suggestions if item.replacement is None}
             prepared = build_query(query, self.raw_query)
             if self.tokenizer.count(prepared) > MAX_QUERY_TOKENS:
                 raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов')
@@ -143,7 +149,8 @@ class SearchService:
                 results.append(ArticleResponse(article_id=item.article_id, title=item.title, url=item.url,
                                                snippet=snippet, score=item.score))
             return SearchResponse(original_query=request.query, used_query=query, corrected=query != request.query.strip(),
-                                  results=results, elapsed_ms=round((perf_counter() - start) * 1000, 1))
+                                  results=results, elapsed_ms=round((perf_counter() - start) * 1000, 1),
+                                  alternatives=alternatives)
         finally:
             self.lock.release()
 

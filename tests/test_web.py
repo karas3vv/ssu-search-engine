@@ -120,6 +120,38 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.get('/api/health', headers={'Host': 'unrelated.example'}).status_code, 400)
                 self.assertEqual(embeddings.calls, [])
 
+    # интерфейс применяет исправление явно, а повторный запрос может отменить его один раз
+    def test_corrected_search_and_original_retry_send_exactly_one_query_each(self) -> None:
+        with closing(QdrantClient(location=':memory:')) as store:
+            service, embeddings = make_service(store)
+            with TestClient(create_app(lambda: service)) as client:
+                corrected = client.post('/api/search', json={'query': 'pyhton', 'correct_typos': True}).json()
+                self.assertEqual(corrected['used_query'], 'python')
+                self.assertEqual(corrected['original_query'], 'pyhton')
+                self.assertEqual(corrected['alternatives'], {})
+                original = client.post('/api/search', json={
+                    'query': corrected['original_query'], 'correct_typos': False,
+                }).json()
+                self.assertEqual(original['used_query'], 'pyhton')
+                self.assertFalse(original['corrected'])
+                self.assertEqual(len(embeddings.calls), 2)
+                self.assertTrue(embeddings.calls[0][0].endswith('<query>python'))
+                self.assertTrue(embeddings.calls[1][0].endswith('<query>pyhton'))
+
+    def test_ambiguous_words_are_returned_as_suggestions_and_not_applied(self) -> None:
+        with closing(QdrantClient(location=':memory:')) as store:
+            service, embeddings = make_service(store)
+            words = {'серверы': 3, 'сервера': 3}
+            service.dictionary = SpellingDictionary(words, DictionaryInfo(
+                'test', 3, 3, dictionary_hash(words), '2026-10-19T00:00:00+00:00',
+            ))
+            with TestClient(create_app(lambda: service)) as client:
+                response = client.post('/api/search', json={'query': 'серверо', 'correct_typos': True}).json()
+                self.assertEqual(response['used_query'], 'серверо')
+                self.assertFalse(response['corrected'])
+                self.assertEqual(set(response['alternatives']['серверо']), {'серверы', 'сервера'})
+                self.assertEqual(len(embeddings.calls), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

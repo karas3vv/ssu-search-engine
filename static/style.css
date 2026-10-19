@@ -135,17 +135,6 @@
                                                       padding:15px 22px;
                                                       border-top:1px solid #edf1ef;
                                                       font-size:12px}
-                                                      .checkbox{
-                                                        display:flex;
-                                                        align-items:center;
-                                                        gap:8px;
-                                                        color:#53696d;
-                                                        cursor:pointer}
-                                                        .checkbox input{
-                                                          accent-color:var(--accent);
-                                                          width:15px;
-                                                          height:15px;
-                                                          margin:0}
                                                           .text-button{
                                                             border:0;
                                                             background:none;
@@ -368,3 +357,7 @@
                                                                                                                                                                     animation:none!important;
                                                                                                                                                                     transition:none!important}
                                                                                                                                                                   }
+
+/* пояснение проверки и отмена исправления не требуют отдельного переключателя */
+.spelling-note { color: #65777b; }
+.original-query { margin-left: 6px; text-decoration: underline; text-underline-offset: 3px; }
