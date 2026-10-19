@@ -7,7 +7,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +15,7 @@ from qdrant_client import QdrantClient
 
 from chunking import ChunkingConfig, chunk_article
 from embeddings import EmbeddingAPIError
-from index import collection_name, ensure_collection, index_chunks, main
+from index import VECTOR_SIZE, collection_name, ensure_collection, index_chunks, main
 from prepare import PreparedArticle
 
 
@@ -45,6 +45,23 @@ class FakeEmbeddings:
         return [[float(len(text)), 1.0, 1.0] for text in texts]
 
 
+# подставной клиент для проверки полной команды с рабочей размерностью вектора
+class CliEmbeddings:
+    # начинаем подсчёт вызовов и отслеживаем закрытие клиента
+    def __init__(self) -> None:
+        self.calls: int = 0
+        self.closed: bool = False
+
+    # возвращаем один ненулевой вектор на текст, не обращаясь к модели
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        return [[1.0] + [0.0] * (VECTOR_SIZE - 1) for _ in texts]
+
+    # закрытие выполняется командой даже при работе с подставным клиентом
+    def close(self) -> None:
+        self.closed = True
+
+
 # создаём подготовленную статью с известным текстом и отпечатком для теста
 def article(text: str, article_id: int = 1) -> PreparedArticle:
     return PreparedArticle(
@@ -56,6 +73,48 @@ def article(text: str, article_id: int = 1) -> PreparedArticle:
 
 # группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class IndexTests(unittest.TestCase):
+    # неправильный тайм-аут отклоняется до чтения корпуса и получения ключа
+    def test_invalid_timeout_is_rejected_before_accessing_inputs(self) -> None:
+        for value in ['0', '-1', 'nan', 'inf']:
+            with (self.subTest(value=value), patch('sys.argv', ['index.py', '--timeout', value]),
+                  patch('index.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
+                  patch('index.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('index.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
+                main()
+            self.assertEqual(error.exception.code, 2)
+
+    # настройка ожидания доходит до клиента, а сохранение по-прежнему работает
+    def test_cli_passes_timeout_and_keeps_source_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'source.sqlite3'
+            storage = Path(folder) / 'qdrant'
+            with closing(sqlite3.connect(source)) as db:
+                db.execute('CREATE TABLE articles (id INTEGER PRIMARY KEY, payload TEXT)')
+                db.execute('INSERT INTO articles VALUES (?,?)', (1, json.dumps({
+                    'id': 1, 'url': 'https://habr.com/ru/articles/1/', 'title': 'тест', 'text': 'текст',
+                })))
+                db.commit()
+            before = source.read_bytes()
+            backend = CliEmbeddings()
+            argv = ['index.py', '--source', str(source), '--qdrant-path', str(storage),
+                    '--limit', '1', '--timeout', '420']
+            store = QdrantClient(path=str(storage))
+            with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
+                  patch('index.load_tokenizer', return_value=CharacterTokenizer()),
+                  patch('index.connect_store', return_value=store),
+                  patch('index.read_api_key', return_value='test-key'),
+                  patch('index.EmbeddingsClient', return_value=backend) as factory,
+                  redirect_stdout(io.StringIO())):
+                self.assertEqual(main(), 0)
+                self.assertEqual(factory.call_args.args[0].timeout_seconds, 420.0)
+            self.assertTrue(backend.closed)
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(before, source.read_bytes())
+            with closing(QdrantClient(path=str(storage))) as reopened:
+                name = collection_name('https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings', 'parser', ChunkingConfig())
+                self.assertEqual(reopened.count(name, exact=True).count, 1)
+
     # сохранённые точки доступны после перезапуска и не отправляются в модель повторно
     def test_saved_points_survive_restart_and_are_not_embedded_twice(self) -> None:
         doc = article('фрагмент ' * 80)

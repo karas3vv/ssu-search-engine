@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from contextlib import ExitStack, closing
@@ -143,6 +144,7 @@ class CliArgs(argparse.Namespace):
     batch_size: int
     max_tokens: int
     overlap_tokens: int
+    timeout_seconds: float  # ожидание данных ответа mws для одного пакета
     dry_run: bool
 
 
@@ -158,10 +160,14 @@ def main() -> int:
     parser.add_argument('--batch-size', type=int, default=4, help='число фрагментов в одном запросе mws')
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
+    parser.add_argument('--timeout', '--timeout-seconds', dest='timeout_seconds', type=float, default=300.0,
+                        help='ожидание данных ответа MWS в секундах, по умолчанию 300')
     parser.add_argument('--dry-run', action='store_true', help='посчитать фрагменты без mws и без записи индекса')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.limit < 1 or args.batch_size < 1:
         parser.error('limit и batch-size должны быть положительными')
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        parser.error('timeout должен быть положительным конечным числом')
     if not args.source.is_file():
         parser.error(f'исходная база не найдена: {args.source}')
     try:
@@ -185,7 +191,9 @@ def main() -> int:
                 stack.callback(store.close)
                 ensure_collection(store, name, create_article_index=store_config.url is not None)
                 key = read_api_key()
-                embeddings = stack.enter_context(closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))))
+                # ожидание не входит в имя коллекции и не меняет id ранее записанных фрагментов
+                embedding_config = EmbeddingConfig(key, url, deployment, timeout_seconds=args.timeout_seconds)
+                embeddings = stack.enter_context(closing(EmbeddingsClient(embedding_config)))
             for article in islice(prepared, args.limit):
                 chunks = list(chunk_article(article, tokenizer, config))
                 chunk_count += len(chunks)
