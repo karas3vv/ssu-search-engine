@@ -15,10 +15,10 @@
 
 ## Расширение индекса
 
-Индексатор читает те же первые 500 принятых статей из `prepare.py`. На текущем корпусе пробное разбиение дало 2571 фрагмент, максимум 1016 токенов из 1024, без отклонённых записей. При неизменных настройках уже сохранённые 446 фрагментов первых 100 статей будут пропущены, останется получить 2125 векторов новых фрагментов.
+Индексатор читает те же первые 500 принятых статей из `habr_search/ingestion/prepare.py`. На текущем корпусе пробное разбиение дало 2571 фрагмент, максимум 1016 токенов из 1024, без отклонённых записей. При неизменных настройках уже сохранённые 446 фрагментов первых 100 статей будут пропущены, останется получить 2125 векторов новых фрагментов.
 
 ```bash
-python index.py --limit 500 --qdrant-url http://127.0.0.1:6333 --timeout 300
+python -m habr_search.ingestion.index --limit 500 --qdrant-url http://127.0.0.1:6333 --timeout 300
 ```
 
 Команда обращается к MWS для новых фрагментов. `--timeout` ограничивает ожидание данных ответа одного пакета; подключение ограничено отдельно. Значение по умолчанию теперь 300 секунд, допускается также имя `--timeout-seconds`. Автоматических повторов нет. После остановки можно повторить ту же команду: подтверждённые точки будут пропущены. Изменение ожидания не меняет имя коллекции и id фрагментов.
@@ -30,13 +30,13 @@ python index.py --limit 500 --qdrant-url http://127.0.0.1:6333 --timeout 300
 Проверить формат набора без MWS и Qdrant:
 
 ```bash
-python evaluate.py --queries evaluation/queries_dev.csv --dry-run
+python -m habr_search.evaluation.evaluate --queries evaluation/queries_dev.csv --dry-run
 ```
 
 Получить новый семантический отчёт на 32 запросах:
 
 ```bash
-python evaluate.py --queries evaluation/queries_dev.csv \
+python -m habr_search.evaluation.evaluate --queries evaluation/queries_dev.csv \
   --qdrant-url http://127.0.0.1:6333 --timeout 300 \
   --output data/evaluation/dev-semantic-500.csv
 ```
@@ -46,7 +46,7 @@ python evaluate.py --queries evaluation/queries_dev.csv \
 Итоговый запуск отложенного набора выполняется после выбора настроек:
 
 ```bash
-python evaluate.py --queries evaluation/queries_holdout.csv \
+python -m habr_search.evaluation.evaluate --queries evaluation/queries_holdout.csv \
   --qdrant-url http://127.0.0.1:6333 --timeout 300 \
   --output data/evaluation/holdout-semantic-500.csv
 ```

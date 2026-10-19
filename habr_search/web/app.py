@@ -20,12 +20,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
-from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
-from index import EmbeddingProvider, collection_name
-from search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
-from spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, SpellingDictionary, load_dictionary
-from vector_store import QdrantConfig, connect_store, resolve_qdrant_config
+from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.index import EmbeddingProvider, collection_name
+from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
+from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, SpellingDictionary, load_dictionary
+from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 from qdrant_client import QdrantClient
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
@@ -37,11 +37,13 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=MAX_QUERY_CHARS)
 
 
+# поисковый запрос дополнительно задаёт размер выдачи и применение исправлений
 class SearchRequest(QueryRequest):
     top_k: int = Field(default=5, ge=1, le=20)
     correct_typos: bool = False
 
 
+# отдаём предложения опечаточника без обращения к модели
 class SuggestionResponse(BaseModel):
     original_query: str
     corrected_query: str
@@ -49,6 +51,7 @@ class SuggestionResponse(BaseModel):
     alternatives: dict[str, list[str]]
 
 
+# одна карточка выдачи: статья, подходящий отрывок и оценка сходства
 class ArticleResponse(BaseModel):
     article_id: int
     title: str
@@ -57,6 +60,7 @@ class ArticleResponse(BaseModel):
     score: float
 
 
+# возвращаем использованную фразу, найденные статьи и неприменённые варианты
 class SearchResponse(BaseModel):
     original_query: str
     used_query: str
@@ -66,6 +70,7 @@ class SearchResponse(BaseModel):
     alternatives: dict[str, list[str]] = Field(default_factory=dict)
 
 
+# сведения об индексе и доступности словаря на момент запуска сервиса
 class HealthResponse(BaseModel):
     collection: str
     fragments: int
@@ -77,15 +82,21 @@ class SearchBusyError(RuntimeError):
     """один запрос уже выполняется; новый не отправляется в платный api."""
 
 
+# общий интерфейс настоящего сервиса и его подстановки в http-тестах
 class SearchBackend(Protocol):
+    # читаем сведения о загруженном сервисе
     def health(self) -> HealthResponse: ...
+    # получаем локальные предложения для запроса
     def suggest(self, query: str) -> SuggestionResponse: ...
+    # выполняем поиск с заданными параметрами
     def search(self, request: SearchRequest) -> SearchResponse: ...
+    # освобождаем ресурсы сервиса при остановке
     def close(self) -> None: ...
 
 
 class SearchService:
     """переиспользуем подключения и словарь, выполняем один запрос поиска за раз."""
+    # проверяем совместимость индекса и словаря до обработки пользовательских запросов
     def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
                  embeddings: EmbeddingProvider, dictionary: SpellingDictionary | None,
                  raw_query: bool = False) -> None:
@@ -106,10 +117,12 @@ class SearchService:
         )
         self.resources: ExitStack = ExitStack()
 
+    # возвращаем подготовленные сведения без сетевых проверок
     def health(self) -> HealthResponse:
         # это сведения на момент запуска, а не платная проверка модели
         return self.status
 
+    # проверяем фразу и возвращаем варианты из уже загруженного словаря
     def suggest(self, query: str) -> SuggestionResponse:
         build_query(query)
         if self.dictionary is None:
@@ -119,6 +132,7 @@ class SearchService:
                                   alternatives={item.original: [candidate.word for candidate in item.candidates]
                                                 for item in result.suggestions})
 
+    # проверяем запрос, исправляем допустимые опечатки и получаем один вектор для поиска
     def search(self, request: SearchRequest) -> SearchResponse:
         if not self.lock.acquire(blocking=False):
             raise SearchBusyError('поиск уже выполняется; дождитесь результата')
@@ -154,10 +168,12 @@ class SearchService:
         finally:
             self.lock.release()
 
+    # закрываем подключения, переданные сервису при его создании
     def close(self) -> None:
         self.resources.close()
 
 
+# настройки подключений, локальных файлов и подготовки поискового запроса
 @dataclass(frozen=True)
 class WebConfig:
     store: QdrantConfig
@@ -188,6 +204,7 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
     """фабрика позволяет проверять весь http-путь без настоящего ключа и вызовов mws."""
     active: dict[str, SearchBackend] = {}
 
+    # создаём сервис один раз при запуске и закрываем его при остановке приложения
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         service = factory()
@@ -202,6 +219,7 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
     app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
 
+    # проверяем источник запроса перед выполнением действий через локальный api
     @app.middleware('http')
     async def check_origin(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         # сторонняя страница не должна запускать платные поиски через локальный сервер
@@ -212,19 +230,23 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
                 return JSONResponse({'detail': 'запрос разрешён только со страницы этого сервера'}, status_code=403)
         return await call_next(request)
 
+    # не допускаем обращение к сервису до завершения его загрузки
     def service() -> SearchBackend:
         if 'service' not in active:
             raise HTTPException(503, 'поиск ещё не готов')
         return active['service']
 
+    # отдаём страницу, стили и скрипты подключаются с этого же сервера
     @app.get('/', include_in_schema=False)
     def home() -> FileResponse:
         return FileResponse(STATIC_DIR / 'index.html')
 
+    # передаём странице сведения о корпусе и словаре
     @app.get('/api/health')
     def health() -> HealthResponse:
         return service().health()
 
+    # преобразуем ошибку проверки фразы в понятный http-ответ
     @app.post('/api/suggest')
     def suggest(request: QueryRequest) -> SuggestionResponse:
         try:
@@ -232,6 +254,7 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
 
+    # сопоставляем сбои поиска с http-статусами, не раскрывая ключ модели
     @app.post('/api/search')
     def search(request: SearchRequest) -> SearchResponse:
         try:
@@ -248,6 +271,7 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
     return app
 
 
+# параметры запуска локального сервера и подключения к индексу
 class CliArgs(argparse.Namespace):
     qdrant_url: str | None
     qdrant_path: Path | None
@@ -261,6 +285,7 @@ class CliArgs(argparse.Namespace):
     overlap_tokens: int
 
 
+# читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     location = parser.add_mutually_exclusive_group()

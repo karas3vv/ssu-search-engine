@@ -1,4 +1,4 @@
-"""делим статьи на фрагменты для будущего поискового индекса."""
+"""делим статьи на фрагменты для поискового индекса."""
 # вход: подготовленные статьи; выход: фрагменты с текстом, координатами и стабильными id
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ import requests
 from tokenizers import Tokenizer
 from tokenizers.processors import TemplateProcessing
 
-from prepare import DEFAULT_SOURCE, PreparationStats, PreparedArticle, iter_prepared_articles
+from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, PreparedArticle, iter_prepared_articles
+
+from habr_search.paths import MODELS_DIR
 
 # фиксируем версию, чтобы одинаковые настройки всегда давали одинаковые фрагменты
 MODEL_ID: str = 'BAAI/bge-multilingual-gemma2'
@@ -27,7 +29,7 @@ MODEL_REVISION: str = '8365500e19bc804136f4ad12c2494430239a2d72'
 MODEL_MAX_TOKENS: int = 8192  # предел модели; у удалённого деплоймента лимит может быть ниже
 CHUNKING_VERSION: str = '2'
 DEFAULT_TOKENIZER: Path = (
-    Path(__file__).resolve().parent / 'models' / MODEL_ID / MODEL_REVISION / 'tokenizer.json'
+    MODELS_DIR / MODEL_ID / MODEL_REVISION / 'tokenizer.json'
 )
 
 
@@ -45,7 +47,7 @@ class ChunkingConfig:
             raise ValueError('overlap_tokens должен быть неотрицательным и меньше половины max_tokens')
 
 
-# индексатор позже будет получать такие записи по одной
+# индексатор получает такие записи по одной
 @dataclass(frozen=True)
 class ArticleChunk:
     id: str  # стабильный uuid, который подходит для точки в qdrant

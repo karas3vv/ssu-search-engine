@@ -10,18 +10,20 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-import spelling
-from evaluate import (
+from habr_search.retrieval import spelling
+from habr_search.evaluation.evaluate import (
     QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, QueryEvaluation, ReportContext,
     load_queries, load_report, query_set_hash, summarize,
 )
-from spelling import DEFAULT_DICTIONARY, SpellingDictionary, load_dictionary
+from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, SpellingDictionary, load_dictionary
 
-ROOT: Path = Path(__file__).resolve().parent
+from habr_search.paths import PROJECT_ROOT as ROOT
+
 DEFAULT_CASES: Path = ROOT / 'evaluation' / 'spelling_queries.csv'
 CASE_COLUMNS: tuple[str, ...] = ('query_id', 'category', 'query', 'expected_query', 'relevant_article_ids')
 
 
+# эталон объединяет поисковую разметку и ожидаемый текст после исправления
 @dataclass(frozen=True)
 class SpellingCase:
     case: EvaluationQuery
@@ -56,6 +58,7 @@ def load_cases(path: Path) -> list[SpellingCase]:
     return cases
 
 
+# сохраняем отдельный набор запросов, не перезаписывая предыдущий файл
 def write_queries(path: Path, cases: Sequence[EvaluationQuery]) -> None:
     with path.open('x', encoding='utf-8', newline='') as target:
         writer = csv.writer(target)
@@ -146,6 +149,7 @@ def compare_reports(original_queries: Path, corrected_queries: Path,
     print(f'лучше: {improved}; хуже: {worse}; одинаково: {unchanged}')
 
 
+# параметры локальной проверки и сравнения уже готовых отчётов
 class CliArgs(argparse.Namespace):
     command: str
     cases: Path
@@ -157,6 +161,7 @@ class CliArgs(argparse.Namespace):
     corrected_report: Path
 
 
+# выбираем локальную проверку или сравнение отчётов без вызова модели
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)

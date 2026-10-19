@@ -9,13 +9,13 @@
 ## Локальная оценка
 
 ```bash
-python evaluate_spelling.py local --output-dir data/evaluation/spelling-baseline
+python -m habr_search.evaluation.evaluate_spelling local --output-dir data/evaluation/spelling-baseline
 ```
 
 Команда не использует MWS, токенизатор или Qdrant. Читается существующий словарь `data/spelling.sqlite3`; иной путь задаётся через `--dictionary`. Новая папка содержит:
 
 - `local.csv` — ожидаемое и фактическое исправление, признак полного совпадения и изменения, отпечатки словаря, правил и набора, имя коллекции и число точек;
-- `original.csv` — исходные запросы в формате `evaluate.py`;
+- `original.csv` — исходные запросы в формате `habr_search/evaluation/evaluate.py`;
 - `corrected.csv` — реально применённые исправления с теми же id и ожидаемыми статьями.
 
 В `corrected.csv` попадает ответ алгоритма, а не эталон. Неподдержанные опечатки остаются в нём неисправленными. Существующая папка не перезаписывается; для повторной проверки задайте другое имя или пропустите `--output-dir`, чтобы получить имя по времени UTC. Исходная разметка не изменяется.
@@ -37,11 +37,11 @@ SHA-256 частот словаря: `b5306bd7a641cbc5e74997c28613eb61315f9d6a94
 Следующие две команды пользователь запускает с ключом MWS. Это по 30 обращений на полный запуск с нуля, всего 60. Индекс статей не пересчитывается.
 
 ```bash
-python evaluate.py --queries data/evaluation/spelling-baseline/original.csv \
+python -m habr_search.evaluation.evaluate --queries data/evaluation/spelling-baseline/original.csv \
   --qdrant-url http://127.0.0.1:6333 --timeout 300 \
   --output data/evaluation/spelling-baseline/original-search.csv
 
-python evaluate.py --queries data/evaluation/spelling-baseline/corrected.csv \
+python -m habr_search.evaluation.evaluate --queries data/evaluation/spelling-baseline/corrected.csv \
   --qdrant-url http://127.0.0.1:6333 --timeout 300 \
   --output data/evaluation/spelling-baseline/corrected-search.csv
 ```
@@ -51,7 +51,7 @@ python evaluate.py --queries data/evaluation/spelling-baseline/corrected.csv \
 После двух полностью завершённых запусков сравнить готовые CSV без MWS:
 
 ```bash
-python evaluate_spelling.py compare \
+python -m habr_search.evaluation.evaluate_spelling compare \
   --original-queries data/evaluation/spelling-baseline/original.csv \
   --corrected-queries data/evaluation/spelling-baseline/corrected.csv \
   --original-report data/evaluation/spelling-baseline/original-search.csv \

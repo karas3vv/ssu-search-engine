@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_DICTIONARY: Path = Path(__file__).resolve().parent / 'data' / 'spelling.sqlite3'
+from habr_search.paths import DATA_DIR
+
+DEFAULT_DICTIONARY: Path = DATA_DIR / 'spelling.sqlite3'
 DICTIONARY_VERSION: str = '1'
 WORD_PATTERN: re.Pattern[str] = re.compile(r'[a-zA-Zа-яА-ЯёЁ]+')
 MAX_WORD_LENGTH: int = 40
@@ -31,6 +33,7 @@ class DictionaryInfo:
     created_at: str
 
 
+# вариант написания с числом правок, частотой и близостью триграмм
 @dataclass(frozen=True)
 class SpellingCandidate:
     word: str
@@ -49,6 +52,7 @@ class WordSuggestion:
     replacement: str | None
 
 
+# результат содержит исходную фразу, исправленную фразу и все предложения
 @dataclass(frozen=True)
 class SpellingResult:
     original: str
@@ -114,7 +118,9 @@ def dictionary_hash(frequencies: Mapping[str, int]) -> str:
     return digest.hexdigest()
 
 
+# держим частоты слов и обратный индекс триграмм для быстрого отбора вариантов
 class SpellingDictionary:
+    # проверяем словарь и связываем каждую триграмму со словами, где она встречается
     def __init__(self, frequencies: Mapping[str, int], info: DictionaryInfo) -> None:
         if (not info.collection or info.points < 1 or info.articles < 1 or info.articles > info.points
                 or not frequencies):
@@ -139,10 +145,12 @@ class SpellingDictionary:
             for gram in grams:
                 self.postings[gram].add(word)
 
+    # проверяем имя коллекции и число точек; изменения текста при том же числе не обнаруживаются
     def validate_context(self, collection: str, points: int) -> None:
         if self.info.collection != collection or self.info.points != points:
             raise ValueError('словарь относится к другой коллекции или числу фрагментов; пересоберите его')
 
+    # отбираем слова по триграммам, затем уточняем число правок и порядок вариантов
     def candidates(self, word: str, limit: int = 3) -> tuple[SpellingCandidate, ...]:
         if limit < 1:
             raise ValueError('число кандидатов должно быть положительным')
@@ -167,6 +175,7 @@ class SpellingDictionary:
         ranked.sort(key=lambda item: (item.distance, -item.article_frequency, -item.similarity, item.word))
         return tuple(ranked[:limit])
 
+    # разбираем слова запроса и собираем новую фразу, сохраняя остальные символы
     def suggest(self, query: str) -> SpellingResult:
         if not query.strip() or len(query) > MAX_QUERY_CHARS:
             raise ValueError(f'нужен непустой запрос длиной до {MAX_QUERY_CHARS} символов')
@@ -227,7 +236,7 @@ def save_dictionary(path: Path, frequencies: Mapping[str, int], collection: str,
 def load_dictionary(path: Path) -> SpellingDictionary:
     """читаем базу только для чтения и проверяем формат, частоты и отпечаток."""
     if not path.is_file():
-        raise ValueError(f'словарь не найден: {path}; сначала выполните spellcheck.py build')
+        raise ValueError(f'словарь не найден: {path}; сначала выполните python -m habr_search.retrieval.spellcheck build')
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as connection:
             metadata = dict(connection.execute('SELECT key, value FROM metadata').fetchall())

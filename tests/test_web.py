@@ -7,12 +7,13 @@ from contextlib import closing
 from fastapi.testclient import TestClient
 from qdrant_client import QdrantClient, models
 
-from index import VECTOR_SIZE, ensure_collection
-from spelling import DictionaryInfo, SpellingDictionary, dictionary_hash
-from test_evaluate import CharacterTokenizer, FakeEmbeddings
-from web import SearchService, create_app
+from habr_search.ingestion.index import VECTOR_SIZE, ensure_collection
+from habr_search.retrieval.spelling import DictionaryInfo, SpellingDictionary, dictionary_hash
+from tests.test_evaluate import CharacterTokenizer, FakeEmbeddings
+from habr_search.web.app import SearchService, create_app
 
 
+# собираем сервис с временным индексом и подставным клиентом модели
 def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
     ensure_collection(store, 'test')
     vector = [1.0] + [0.0] * (VECTOR_SIZE - 1)
@@ -29,7 +30,9 @@ def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
     return service, embeddings
 
 
+# проверяем страницу, форматы api, обработку ошибок и число вызовов модели
 class WebTests(unittest.TestCase):
+    # страница, сведения о корпусе и подсказки работают без вызова модели
     def test_page_health_and_suggestions_do_not_call_model(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -46,6 +49,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(embeddings.calls, [])
             self.assertTrue(embeddings.closed)
 
+    # флаг запроса управляет исправлениями, а сам поиск не меняет индекс
     def test_search_corrects_only_when_requested_and_preserves_index(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -63,6 +67,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(len(embeddings.calls), 2)
             self.assertEqual(store.scroll('test', limit=10, with_vectors=True), before)
 
+    # ошибочные поля и слишком длинные запросы отклоняются до платного вызова
     def test_invalid_input_and_long_tokens_stop_before_paid_call(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -80,6 +85,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.post('/api/suggest', json={'query': '  '}).status_code, 400)
                 self.assertEqual(embeddings.calls, [])
 
+    # параллельный поиск отклоняется, сбой модели не вызывает автоматическую повторную оплату
     def test_busy_search_is_rejected_and_model_failure_does_not_retry(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -97,6 +103,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.post('/api/search', json={'query': 'python'}).status_code, 200)
                 self.assertEqual(len(embeddings.calls), 2)
 
+    # исправление не применяется при изменении индекса или отсутствии словаря
     def test_changed_index_and_missing_dictionary_reject_correction(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -110,6 +117,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.post('/api/search', json={'query': 'pyhton', 'correct_typos': True}).status_code, 400)
                 self.assertEqual(embeddings.calls, [])
 
+    # запрос со сторонней страницы блокируется до обращения к модели
     def test_foreign_page_cannot_launch_paid_search(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)
@@ -138,6 +146,7 @@ class WebTests(unittest.TestCase):
                 self.assertTrue(embeddings.calls[0][0].endswith('<query>python'))
                 self.assertTrue(embeddings.calls[1][0].endswith('<query>pyhton'))
 
+    # неоднозначные варианты показываются пользователю без изменения поисковой фразы
     def test_ambiguous_words_are_returned_as_suggestions_and_not_applied(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             service, embeddings = make_service(store)

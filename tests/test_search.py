@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from qdrant_client import QdrantClient, models
 
-from index import ensure_collection
-from search import QUERY_INSTRUCTION, build_query, main, search_articles, validate_collection
+from habr_search.ingestion.index import ensure_collection
+from habr_search.retrieval.search import QUERY_INSTRUCTION, build_query, main, search_articles, validate_collection
 
 
 # создаём точку с заранее заданным вектором и метаданными статьи
@@ -75,10 +75,10 @@ class SearchTests(unittest.TestCase):
     def test_missing_collection_does_not_request_key_or_call_mws(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
             argv = ['search.py', '--query', 'запрос', '--qdrant-url', 'http://localhost:6333']
-            with (patch('sys.argv', argv), patch('search.connect_store', return_value=store),
-                  patch('search.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                  patch('search.EmbeddingsClient', side_effect=AssertionError('mws не нужен')),
-                  patch('search.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
+            with (patch('sys.argv', argv), patch('habr_search.retrieval.search.connect_store', return_value=store),
+                  patch('habr_search.retrieval.search.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.retrieval.search.EmbeddingsClient', side_effect=AssertionError('mws не нужен')),
+                  patch('habr_search.retrieval.search.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
                   redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
                 main()
             self.assertEqual(error.exception.code, 1)

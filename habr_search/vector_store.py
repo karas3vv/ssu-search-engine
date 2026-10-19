@@ -9,7 +9,9 @@ from urllib.parse import urlsplit
 
 from qdrant_client import QdrantClient
 
-DEFAULT_QDRANT_PATH: Path = Path(__file__).resolve().parent / 'data' / 'qdrant'
+from habr_search.paths import DATA_DIR
+
+DEFAULT_QDRANT_PATH: Path = DATA_DIR / 'qdrant'
 
 
 # выбираем один режим хранения: адрес сервера либо локальную папку

@@ -9,8 +9,8 @@ from tempfile import TemporaryDirectory
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 
-from chunking import ChunkingConfig, ModelTokenizer, chunk_article
-from prepare import PreparedArticle
+from habr_search.ingestion.chunking import ChunkingConfig, ModelTokenizer, chunk_article
+from habr_search.ingestion.prepare import PreparedArticle
 
 
 # вместо модели используем прозрачный счётчик: один символ равен одному токену

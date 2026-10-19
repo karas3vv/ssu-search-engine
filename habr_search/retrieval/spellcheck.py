@@ -13,15 +13,15 @@ from qdrant_client import QdrantClient
 from qdrant_client.conversions import common_types as qdrant_types
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from chunking import ChunkingConfig
-from embeddings import DEFAULT_MODEL, DEFAULT_URL
-from evaluate import QUERY_COLUMNS, EvaluationQuery, load_queries
-from index import collection_name
-from spelling import (
+from habr_search.ingestion.chunking import ChunkingConfig
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL
+from habr_search.evaluation.evaluate import QUERY_COLUMNS, EvaluationQuery, load_queries
+from habr_search.ingestion.index import collection_name
+from habr_search.retrieval.spelling import (
     DEFAULT_DICTIONARY, DictionaryInfo, SpellingDictionary, SpellingResult,
     load_dictionary, save_dictionary, vocabulary_words,
 )
-from vector_store import connect_store, resolve_qdrant_config
+from habr_search.vector_store import connect_store, resolve_qdrant_config
 
 
 def build_dictionary(store: QdrantClient, name: str, output: Path, batch_size: int = 256) -> DictionaryInfo:
@@ -89,6 +89,7 @@ def prepare_evaluation(dictionary: SpellingDictionary, source: Path, output: Pat
     return changed
 
 
+# показываем варианты написания и отличаем предложения от применённых замен
 def print_suggestions(result: SpellingResult) -> None:
     print(f'исходный запрос: {result.original}')
     print(f'предложенный запрос: {result.corrected}')
@@ -101,6 +102,7 @@ def print_suggestions(result: SpellingResult) -> None:
         print('подходящих исправлений нет')
 
 
+# параметры построения словаря, проверки фразы и подготовки контрольных запросов
 class CliArgs(argparse.Namespace):
     command: str
     dictionary: Path
@@ -113,6 +115,7 @@ class CliArgs(argparse.Namespace):
     output: Path
 
 
+# выбираем операцию; модель не вызывается ни в одной из этих команд
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)

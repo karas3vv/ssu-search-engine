@@ -11,15 +11,15 @@ from unittest.mock import patch
 
 from qdrant_client import QdrantClient, models
 
-from chunking import ChunkingConfig
-from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError
-from evaluate import (
+from habr_search.ingestion.chunking import ChunkingConfig
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError
+from habr_search.evaluation.evaluate import (
     DEFAULT_QUERIES, QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, ReportContext, ReportEntry,
     evaluate_queries, load_queries, load_report, main, prepare_queries, query_set_hash,
     report_row, score_ranking, summarize, validate_expected_articles,
 )
-from index import VECTOR_SIZE, collection_name, ensure_collection
-from search import build_query
+from habr_search.ingestion.index import VECTOR_SIZE, collection_name, ensure_collection
+from habr_search.retrieval.search import build_query
 
 
 # простой токенизатор для тестов считает символы вместо токенов настоящей модели
@@ -201,10 +201,10 @@ class EvaluationTests(unittest.TestCase):
             output = Path(folder) / 'results.csv'
             argv = ['evaluate.py', '--queries', str(DEFAULT_QUERIES), '--output', str(output), '--dry-run']
             with (patch('sys.argv', argv), redirect_stdout(io.StringIO()) as stdout,
-                  patch('evaluate.connect_store', side_effect=AssertionError('qdrant не нужен')),
-                  patch('evaluate.load_tokenizer', side_effect=AssertionError('скачивание не нужно')),
-                  patch('evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                  patch('evaluate.EmbeddingsClient', side_effect=AssertionError('mws не нужен'))):
+                  patch('habr_search.evaluation.evaluate.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('habr_search.evaluation.evaluate.load_tokenizer', side_effect=AssertionError('скачивание не нужно')),
+                  patch('habr_search.evaluation.evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.evaluation.evaluate.EmbeddingsClient', side_effect=AssertionError('mws не нужен'))):
                 self.assertEqual(main(), 0)
             self.assertIn('контрольных запросов: 18', stdout.getvalue())
             self.assertFalse(output.exists())
@@ -213,8 +213,8 @@ class EvaluationTests(unittest.TestCase):
     def test_invalid_timeout_is_rejected_before_loading_or_connecting(self) -> None:
         for value in ['0', '-1', 'nan', 'inf']:
             with (self.subTest(value=value), patch('sys.argv', ['evaluate.py', '--timeout', value]),
-                  patch('evaluate.load_queries', side_effect=AssertionError('csv не нужен')),
-                  patch('evaluate.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('habr_search.evaluation.evaluate.load_queries', side_effect=AssertionError('csv не нужен')),
+                  patch('habr_search.evaluation.evaluate.connect_store', side_effect=AssertionError('qdrant не нужен')),
                   redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
                 main()
             self.assertEqual(error.exception.code, 2)
@@ -226,8 +226,8 @@ class EvaluationTests(unittest.TestCase):
             output.write_text('предыдущий отчёт', encoding='utf-8')
             argv = ['evaluate.py', '--queries', str(DEFAULT_QUERIES), '--output', str(output)]
             with (patch('sys.argv', argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
-                  patch('evaluate.connect_store', side_effect=AssertionError('подключение не нужно')),
-                  patch('evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.evaluation.evaluate.connect_store', side_effect=AssertionError('подключение не нужно')),
+                  patch('habr_search.evaluation.evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
                   self.assertRaises(SystemExit) as error):
                 main()
             self.assertEqual(error.exception.code, 1)
@@ -247,10 +247,10 @@ class EvaluationTests(unittest.TestCase):
             argv = ['evaluate.py', '--queries', str(source), '--output', str(output),
                     '--qdrant-url', 'http://localhost:6333']
             with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
-                  patch('evaluate.connect_store', return_value=store), redirect_stdout(io.StringIO()),
+                  patch('habr_search.evaluation.evaluate.connect_store', return_value=store), redirect_stdout(io.StringIO()),
                   redirect_stderr(io.StringIO()) as stderr,
-                  patch('evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                  patch('evaluate.EmbeddingsClient', side_effect=AssertionError('mws не нужен')),
+                  patch('habr_search.evaluation.evaluate.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.evaluation.evaluate.EmbeddingsClient', side_effect=AssertionError('mws не нужен')),
                   self.assertRaises(SystemExit) as error):
                 main()
             self.assertEqual(error.exception.code, 1)
@@ -279,10 +279,10 @@ class EvaluationTests(unittest.TestCase):
                     argv = ['evaluate.py', '--queries', str(source), '--output', str(output),
                             '--qdrant-url', 'http://localhost:6333']
                     with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
-                          patch('evaluate.connect_store', return_value=store),
-                          patch('evaluate.load_tokenizer', return_value=CharacterTokenizer()),
-                          patch('evaluate.read_api_key', return_value='test-key'),
-                          patch('evaluate.EmbeddingsClient', return_value=backend),
+                          patch('habr_search.evaluation.evaluate.connect_store', return_value=store),
+                          patch('habr_search.evaluation.evaluate.load_tokenizer', return_value=CharacterTokenizer()),
+                          patch('habr_search.evaluation.evaluate.read_api_key', return_value='test-key'),
+                          patch('habr_search.evaluation.evaluate.EmbeddingsClient', return_value=backend),
                           redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO())):
                         if failure is None:
                             self.assertEqual(main(), 0)
@@ -337,10 +337,10 @@ class EvaluationTests(unittest.TestCase):
                     argv.extend(['--resume', str(resume)])
                 client = QdrantClient(path=str(storage))
                 with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
-                      patch('evaluate.connect_store', return_value=client),
-                      patch('evaluate.load_tokenizer', return_value=CharacterTokenizer()) as tokenizer,
-                      patch('evaluate.read_api_key', return_value='test-key') as key,
-                      patch('evaluate.EmbeddingsClient', return_value=backend) as factory,
+                      patch('habr_search.evaluation.evaluate.connect_store', return_value=client),
+                      patch('habr_search.evaluation.evaluate.load_tokenizer', return_value=CharacterTokenizer()) as tokenizer,
+                      patch('habr_search.evaluation.evaluate.read_api_key', return_value='test-key') as key,
+                      patch('habr_search.evaluation.evaluate.EmbeddingsClient', return_value=backend) as factory,
                       redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr):
                     if expected_code == 0:
                         self.assertEqual(main(), 0)

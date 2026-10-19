@@ -12,18 +12,19 @@ from unittest.mock import patch
 
 from qdrant_client import QdrantClient, models
 
-from evaluate import QUERY_COLUMNS, load_queries
-from chunking import ChunkingConfig
-from embeddings import DEFAULT_MODEL, DEFAULT_URL
-from index import VECTOR_SIZE, collection_name, ensure_collection
-from search import build_query, main as search_main
-from spellcheck import build_dictionary, prepare_evaluation
-from spelling import (
+from habr_search.evaluation.evaluate import QUERY_COLUMNS, load_queries
+from habr_search.ingestion.chunking import ChunkingConfig
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL
+from habr_search.ingestion.index import VECTOR_SIZE, collection_name, ensure_collection
+from habr_search.retrieval.search import build_query, main as search_main
+from habr_search.retrieval.spellcheck import build_dictionary, prepare_evaluation
+from habr_search.retrieval.spelling import (
     DictionaryInfo, SpellingDictionary, dictionary_hash, edit_distance, load_dictionary,
     ngrams, normalize_word, save_dictionary, vocabulary_words,
 )
 
 
+# создаём небольшой словарь с известными частотами для проверки правил исправления
 def dictionary(frequencies: dict[str, int] | None = None) -> SpellingDictionary:
     words = frequencies if frequencies is not None else {
         'автоматизация': 10, 'документов': 8, 'python': 10, 'docker': 7, 'елка': 3,
@@ -32,6 +33,7 @@ def dictionary(frequencies: dict[str, int] | None = None) -> SpellingDictionary:
                                                    '2026-10-19T00:00:00+00:00'))
 
 
+# проверяем безопасные замены, неоднозначность и сохранение словаря
 class SpellingTests(unittest.TestCase):
     # триграммы учитывают начало и конец, а нормализация не размножает формы ё и е
     def test_ngrams_and_normalization(self) -> None:
@@ -53,6 +55,7 @@ class SpellingTests(unittest.TestCase):
         # osa не разрешает повторно редактировать одну и ту же подстроку
         self.assertEqual(edit_distance('ca', 'abc'), 3)
 
+    # сохраняем регистр, знаки препинания и исходную фразу при замене слова
     def test_replacements_keep_case_punctuation_and_original_query(self) -> None:
         query = '  Автоматизаця,  документов! Pyhton. '
         result = dictionary().suggest(query)
@@ -73,6 +76,7 @@ class SpellingTests(unittest.TestCase):
         self.assertEqual(result.corrected, result.original)
         self.assertEqual(result.suggestions[0].candidates[0].distance, 2)
 
+    # не исправляем известные слова, короткие обозначения и защищённые технические токены
     def test_known_rare_short_and_protected_terms_are_kept(self) -> None:
         spelling = dictionary({'автоматизация': 10, 'автоматизаця': 1, 'серверы': 2,
                                'python': 10, 'елка': 3})
@@ -84,6 +88,7 @@ class SpellingTests(unittest.TestCase):
         self.assertTrue(spelling.suggest('серверо').suggestions)
         self.assertEqual(dictionary({'стора': 10}).suggest('репозитории Ктора').corrected, 'репозитории Ктора')
 
+    # при одинаковых частотах порядок вариантов устойчив и лимит проверяется
     def test_candidate_order_is_deterministic_and_limits_are_checked(self) -> None:
         first = dictionary({'серверы': 3, 'сервера': 3})
         second = dictionary({'сервера': 3, 'серверы': 3})
@@ -121,6 +126,7 @@ class SpellingTests(unittest.TestCase):
                 load_dictionary(missing)
             self.assertFalse(missing.exists())
 
+    # не загружаем словарь с неверными словами, частотами или метаданными
     def test_invalid_dictionary_content_is_rejected(self) -> None:
         for words in [{}, {'слово': 0}, {'слово': 11}, {'Слово': 2}, {'слово1': 2}]:
             with self.subTest(words=words), self.assertRaises(ValueError):
@@ -155,6 +161,7 @@ class SpellingTests(unittest.TestCase):
                 build_dictionary(store, 'test', path)
             self.assertFalse(path.exists())
 
+    # исправленный набор сохраняет разметку и не перезаписывает исходные файлы
     def test_corrected_evaluation_preserves_labels_original_and_existing_output(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'queries.csv'
@@ -175,6 +182,7 @@ class SpellingTests(unittest.TestCase):
                 prepare_evaluation(dictionary(), source, output)
             self.assertEqual(output.read_bytes(), saved)
 
+    # не создаём набор, в котором исправления превратили разные запросы в одинаковые
     def test_evaluation_collisions_are_rejected_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'queries.csv'
@@ -190,7 +198,7 @@ class SpellingTests(unittest.TestCase):
 
     # проверяем настоящий путь команды: режим предложения сохраняет исходный вход модели
     def test_search_modes_send_one_query_and_preserve_index(self) -> None:
-        from test_evaluate import CharacterTokenizer, FakeEmbeddings
+        from tests.test_evaluate import CharacterTokenizer, FakeEmbeddings
 
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'dictionary.sqlite3'
@@ -209,25 +217,26 @@ class SpellingTests(unittest.TestCase):
                             '--spelling-mode', mode, '--spelling-db', str(path)]
                     with (patch.dict('os.environ', {'MWS_EMBEDDINGS_URL': DEFAULT_URL,
                                                    'MWS_EMBEDDINGS_MODEL': DEFAULT_MODEL}),
-                          patch('sys.argv', argv), patch('search.connect_store', return_value=store),
+                          patch('sys.argv', argv), patch('habr_search.retrieval.search.connect_store', return_value=store),
                           patch.object(store, 'close'),
-                          patch('search.read_api_key', return_value='synthetic-key'),
-                          patch('search.load_tokenizer', return_value=CharacterTokenizer()),
-                          patch('search.EmbeddingsClient', return_value=embeddings),
+                          patch('habr_search.retrieval.search.read_api_key', return_value='synthetic-key'),
+                          patch('habr_search.retrieval.search.load_tokenizer', return_value=CharacterTokenizer()),
+                          patch('habr_search.retrieval.search.EmbeddingsClient', return_value=embeddings),
                           redirect_stdout(io.StringIO())):
                         self.assertEqual(search_main(), 0)
                     self.assertEqual(embeddings.calls, [[build_query(expected)]])
                     self.assertEqual(store.scroll(name, limit=10, with_vectors=True), before)
 
+    # несовместимый словарь останавливает поиск до обращения к платной модели
     def test_wrong_dictionary_stops_search_before_model_access(self) -> None:
         with tempfile.TemporaryDirectory() as folder, closing(QdrantClient(location=':memory:')) as store:
             path = Path(folder) / 'dictionary.sqlite3'
             save_dictionary(path, {'python': 3}, 'other', 3, 3)
             argv = ['search.py', '--query', 'pyhton', '--qdrant-url', 'http://localhost:6333',
                     '--spelling-mode', 'apply', '--spelling-db', str(path)]
-            with (patch('sys.argv', argv), patch('search.connect_store', return_value=store),
-                  patch('search.validate_collection'), patch('search.read_api_key') as key,
-                  patch('search.load_tokenizer') as tokenizer, patch('search.EmbeddingsClient') as embeddings,
+            with (patch('sys.argv', argv), patch('habr_search.retrieval.search.connect_store', return_value=store),
+                  patch('habr_search.retrieval.search.validate_collection'), patch('habr_search.retrieval.search.read_api_key') as key,
+                  patch('habr_search.retrieval.search.load_tokenizer') as tokenizer, patch('habr_search.retrieval.search.EmbeddingsClient') as embeddings,
                   redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
                 search_main()
             key.assert_not_called()

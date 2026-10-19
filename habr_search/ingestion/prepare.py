@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+from habr_search.paths import DATA_DIR
+
 # по умолчанию читаем базу скрапера из папки data
-DEFAULT_SOURCE: Path = Path(__file__).resolve().parent / 'data' / 'corpus.sqlite3'
+DEFAULT_SOURCE: Path = DATA_DIR / 'corpus.sqlite3'
 # удаляем управляющие символы, но оставляем табуляцию и переносы
 CONTROL_CHARS: re.Pattern[str] = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 # принимаем обычные статьи и статьи из блогов компаний

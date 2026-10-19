@@ -9,6 +9,7 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <!-- шапка и число статей, полученное из локального api -->
   <header class="header">
     <a class="brand" href="/" aria-label="поиск по Хабру — главная"><span class="brand-mark" aria-hidden="true">х</span> Хабр <span class="brand-separator">/</span> поиск</a>
     <span id="article-count" class="article-count" hidden></span>
@@ -18,6 +19,7 @@
       <h1 id="page-title">Найдите статью<br>по вашей задаче.</h1>
       <p class="lead">Опишите, что хотите найти.</p>
     </section>
+    <!-- форма запускает поиск только после отправки пользователем -->
     <form id="search-form" class="search-panel">
       <label class="sr-only" for="query">Что вы хотите найти?</label>
       <div class="search-row">
@@ -27,6 +29,7 @@
       </div>
       <div id="suggestion" class="suggestion" hidden aria-live="polite"></div>
     </form>
+    <!-- примеры заполняют поле, а результаты и ошибки добавляет app.js -->
     <div class="examples" aria-label="примеры запросов"><span>Попробуйте:</span>
       <button type="button" data-query="Как автоматически создавать отчёты Word из Excel на Python?">Отчёты без рутины</button>
       <button type="button" data-query="Как сохранить страницу в PDF с текстом и ссылками?">Страница в PDF</button>

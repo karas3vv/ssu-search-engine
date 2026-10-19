@@ -12,11 +12,11 @@ from pathlib import Path
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from chunking import DEFAULT_TOKENIZER, ChunkingConfig, load_tokenizer
-from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
-from index import VECTOR_SIZE, collection_name
-from spelling import DEFAULT_DICTIONARY, load_dictionary
-from vector_store import connect_store, resolve_qdrant_config
+from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, load_tokenizer
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.index import VECTOR_SIZE, collection_name
+from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, load_dictionary
+from habr_search.vector_store import connect_store, resolve_qdrant_config
 
 QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages that answer the query.'
 MAX_QUERY_TOKENS: int = 1024
@@ -117,7 +117,7 @@ def main() -> int:
     parser.add_argument('--raw-query', action='store_true', help='для сервера, который сам добавляет инструкцию gemma')
     parser.add_argument('--spelling-mode', choices=('off', 'suggest', 'apply'), default='off',
                         help='off: исходный запрос; suggest: показать варианты; apply: применить однозначные исправления')
-    parser.add_argument('--spelling-db', type=Path, default=DEFAULT_DICTIONARY, help='словарь из spellcheck.py build')
+    parser.add_argument('--spelling-db', type=Path, default=DEFAULT_DICTIONARY, help='словарь из python -m habr_search.retrieval.spellcheck build')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.top_k < 1 or args.snippet_chars < 1:
         parser.error('top-k и snippet-chars должны быть положительными')

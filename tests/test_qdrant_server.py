@@ -7,11 +7,11 @@ import unittest
 from contextlib import closing
 from uuid import uuid4
 
-from chunking import ChunkingConfig, chunk_article
-from index import ensure_collection, index_chunks
-from prepare import PreparedArticle
-from search import search_articles, validate_collection
-from vector_store import QdrantConfig, connect_store
+from habr_search.ingestion.chunking import ChunkingConfig, chunk_article
+from habr_search.ingestion.index import ensure_collection, index_chunks
+from habr_search.ingestion.prepare import PreparedArticle
+from habr_search.retrieval.search import search_articles, validate_collection
+from habr_search.vector_store import QdrantConfig, connect_store
 
 TEST_URL: str | None = os.environ.get('QDRANT_TEST_URL')
 

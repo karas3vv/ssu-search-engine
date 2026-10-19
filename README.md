@@ -8,6 +8,23 @@
 
 При поиске опечаточник предлагает исправления с помощью символьных триграмм и проверки числа правок. В веб-интерфейсе однозначные исправления применяются автоматически. Запрос преобразуется в вектор той же моделью, а Qdrant находит близкие фрагменты. Пользователь получает список разных статей с заголовками, ссылками и подходящими отрывками. Повторно обрабатывать весь корпус для каждого запроса не нужно.
 
+## Структура проекта
+
+```text
+habr_search/
+  ingestion/    # сбор статей, очистка, разбиение и индексация
+  retrieval/    # семантический поиск и опечаточник
+  evaluation/   # оценка поиска и сравнение исправлений
+  web/          # сервер и страница поиска в static/
+  embeddings.py # клиент модели MWS
+  vector_store.py # подключение к Qdrant
+  paths.py      # общие пути к данным и токенизатору
+tests/          # автономные проверки
+evaluation/     # контрольные запросы в CSV
+docs/           # подробные инструкции
+data/, models/  # локальные данные, не входят в Git
+```
+
 ## Установка
 
 Нужны Python 3.10+, Docker Compose и ключ MWS. Команды выполняются из папки проекта.
@@ -24,10 +41,10 @@ python -m pip install -r requirements.txt
 docker compose up -d qdrant
 ```
 
-Если запускаете проект впервые, поместите корпус статей в `data/corpus.sqlite3`, [создайте индекс](evaluation/EXPANDED.md) и [словарь опечаток](evaluation/SPELLING.md). Корпус, индекс и словарь не входят в Git.
+Если запускаете проект впервые, поместите корпус статей в `data/corpus.sqlite3`, [создайте индекс](docs/evaluation/EXPANDED.md) и [словарь опечаток](docs/evaluation/SPELLING.md). Корпус, индекс и словарь не входят в Git.
 
 ```bash
-python web.py --qdrant-url http://127.0.0.1:6333
+python -m habr_search.web.app --qdrant-url http://127.0.0.1:6333
 ```
 
 Откройте [localhost:8000](http://127.0.0.1:8000). Ключ MWS вводится в терминале или берётся из `MWS_API_KEY`. Поиск и первичная индексация обращаются к платному API MWS.
@@ -35,7 +52,7 @@ python web.py --qdrant-url http://127.0.0.1:6333
 Поиск из терминала:
 
 ```bash
-python search.py --query "Как создавать отчёты Word из Excel?" \
+python -m habr_search.retrieval.search --query "Как создавать отчёты Word из Excel?" \
   --qdrant-url http://127.0.0.1:6333
 ```
 
@@ -43,14 +60,14 @@ python search.py --query "Как создавать отчёты Word из Excel
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
-python -m mypy --strict *.py tests
-python -m pyright *.py tests
+python -m unittest discover -s tests -t . -v
+python -m mypy --strict habr_search tests
+python -m pyright
 ```
 
 ## Документация
 
-- [Интерфейс и API](WEB.md)
-- [Архитектура и хранение данных](ARCHITECTURE.md)
-- [Оценка качества поиска](evaluation/README.md)
-- [Проверка опечаточника](evaluation/SPELLING_BENCHMARK.md)
+- [Интерфейс и API](docs/WEB.md)
+- [Архитектура и хранение данных](docs/ARCHITECTURE.md)
+- [Оценка качества поиска](docs/evaluation/README.md)
+- [Проверка опечаточника](docs/evaluation/SPELLING_BENCHMARK.md)

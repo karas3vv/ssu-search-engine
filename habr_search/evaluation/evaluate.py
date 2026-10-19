@@ -18,13 +18,14 @@ from pathlib import Path
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
-from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
-from index import VECTOR_SIZE, EmbeddingProvider, collection_name
-from search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
-from vector_store import connect_store, resolve_qdrant_config
+from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
+from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.index import VECTOR_SIZE, EmbeddingProvider, collection_name
+from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
+from habr_search.vector_store import connect_store, resolve_qdrant_config
 
-ROOT: Path = Path(__file__).resolve().parent
+from habr_search.paths import PROJECT_ROOT as ROOT
+
 DEFAULT_QUERIES: Path = ROOT / 'evaluation' / 'queries.csv'
 QUERY_COLUMNS: tuple[str, ...] = ('query_id', 'category', 'query', 'relevant_article_ids')
 # порядок полей csv фиксирован: по нему проверяется совместимость старого отчёта

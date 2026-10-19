@@ -17,15 +17,15 @@ from typing import Protocol
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from chunking import (
+from habr_search.ingestion.chunking import (
     CHUNKING_VERSION, DEFAULT_TOKENIZER, MODEL_ID, MODEL_REVISION,
     ArticleChunk, ChunkingConfig, chunk_article, load_tokenizer,
 )
-from embeddings import (
+from habr_search.embeddings import (
     DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key,
 )
-from prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
-from vector_store import connect_store, resolve_qdrant_config
+from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
+from habr_search.vector_store import connect_store, resolve_qdrant_config
 
 VECTOR_SIZE: int = 3584  # размерность, которую вернул проверенный деплоймент parser
 

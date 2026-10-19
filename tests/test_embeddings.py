@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import requests
 
-from embeddings import EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, parse_vectors
+from habr_search.embeddings import EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, parse_vectors
 
 
 # собираем подставной http-ответ requests с заданным содержимым и статусом

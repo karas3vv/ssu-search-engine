@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vector_store import QdrantConfig, connect_store, resolve_qdrant_config
+from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 
 
 # группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
@@ -28,13 +28,13 @@ class VectorStoreTests(unittest.TestCase):
     # серверному клиенту передаются адрес, ключ и ограничение ожидания
     def test_server_factory_passes_connection_settings(self) -> None:
         config = QdrantConfig(url='https://example.com', api_key='fake-key-not-real')
-        with patch('vector_store.QdrantClient') as factory:
+        with patch('habr_search.vector_store.QdrantClient') as factory:
             connect_store(config)
             factory.assert_called_once_with(url='https://example.com', api_key='fake-key-not-real', timeout=60)
 
     # встроенному хранилищу передаётся только путь к папке
     def test_local_factory_does_not_receive_server_credentials(self) -> None:
-        with patch('vector_store.QdrantClient') as factory:
+        with patch('habr_search.vector_store.QdrantClient') as factory:
             connect_store(QdrantConfig(path=Path('/tmp/local-qdrant-test')))
             factory.assert_called_once_with(path='/tmp/local-qdrant-test')
 

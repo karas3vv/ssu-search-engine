@@ -8,13 +8,14 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from evaluate import REPORT_COLUMNS, EvaluationQuery, ReportContext, ReportEntry, query_set_hash, report_row, score_ranking
-from evaluate_spelling import (
+from habr_search.evaluation.evaluate import REPORT_COLUMNS, EvaluationQuery, ReportContext, ReportEntry, query_set_hash, report_row, score_ranking
+from habr_search.evaluation.evaluate_spelling import (
     CASE_COLUMNS, SpellingCase, compare_reports, evaluate_local, load_cases, write_queries,
 )
-from test_spelling import dictionary
+from tests.test_spelling import dictionary
 
 
+# записываем синтетический отчёт, чтобы проверить сравнение без настоящего поиска
 def report(path: Path, cases: list[EvaluationQuery], ranks: list[list[int]], points: int = 20) -> None:
     context = ReportContext('test', points, query_set_hash(cases), False, 5)
     with path.open('w', encoding='utf-8', newline='') as target:
@@ -24,7 +25,9 @@ def report(path: Path, cases: list[EvaluationQuery], ranks: list[list[int]], poi
             writer.writerow(report_row(ReportEntry('2026-10-19T00:00:00+00:00', score_ranking(case, ids, 5)), context))
 
 
+# проверяем эталоны исправлений и сравнение результатов двух запусков
 class SpellingEvaluationTests(unittest.TestCase):
+    # не засчитываем частичные исправления как полные и сохраняем исходные запросы отдельно
     def test_local_metrics_and_exports_keep_incomplete_corrections_visible(self) -> None:
         cases = [SpellingCase(EvaluationQuery('one', 'typo', 'pyhton', (1,)), 'python'),
                  SpellingCase(EvaluationQuery('two', 'typo', 'афтаматизация', (2,)), 'автоматизация'),
@@ -42,6 +45,7 @@ class SpellingEvaluationTests(unittest.TestCase):
                 evaluate_local(dictionary(), cases, output, 'cases-hash')
             self.assertEqual((output / 'local.csv').read_bytes(), before)
 
+    # отклоняем повреждённую разметку до запуска проверки исправлений
     def test_cases_reject_bad_labels_duplicates_and_empty_groups(self) -> None:
         valid = ['one', 'typo', 'pyhton', 'python', '1']
         clean = ['two', 'clean', 'docker', 'docker', '2']
@@ -57,6 +61,7 @@ class SpellingEvaluationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_cases(path)
 
+    # сравниваем только завершённые отчёты с одинаковым индексом и разметкой
     def test_comparison_rejects_partial_changed_index_and_changed_labels(self) -> None:
         original = [EvaluationQuery('one', 'typo', 'pyhton', (1,)), EvaluationQuery('two', 'clean', 'docker', (2,))]
         corrected = [EvaluationQuery('one', 'typo', 'python', (1,)), original[1]]

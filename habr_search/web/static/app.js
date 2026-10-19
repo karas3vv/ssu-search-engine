@@ -20,6 +20,7 @@ const searchHints = [
 ];
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
+// выбираем новую подсказку, отличную от текущей
 function changeSearchHint() {
   const available = searchHints.filter(text => text !== query.placeholder);
   query.placeholder = available[Math.floor(Math.random() * available.length)];
@@ -31,9 +32,11 @@ window.setInterval(() => {
   changeSearchHint();
 }, 6000);
 
+// меняем сообщение и его оформление без вставки html
 /** @param {string} text @param {string} [kind] */
 function status(text, kind = '') { message.textContent = text; message.className = `message ${kind}`; }
 
+// выбираем русское окончание для числа статей
 /** @param {number} count @param {string[]} forms */
 function plural(count, forms) {
   const rest = count % 100;
@@ -42,6 +45,7 @@ function plural(count, forms) {
   return last === 1 ? forms[0] : last >= 2 && last <= 4 ? forms[1] : forms[2];
 }
 
+// отправляем запрос к своему api и переводим ошибки в короткие сообщения страницы
 /** @param {string} path @param {object | undefined} [body] @returns {Promise<any>} */
 async function api(path, body) {
   let response;
@@ -86,6 +90,7 @@ document.querySelectorAll('[data-query]').forEach(button => button.addEventListe
   query.value = button.getAttribute('data-query') || ''; query.dispatchEvent(new Event('input')); query.focus();
 }));
 
+// показываем только предложенные варианты, которые не применились автоматически
 /** @param {Record<string, string[]>} alternatives */
 function showAlternatives(alternatives) {
   const entries = Object.entries(alternatives);
@@ -134,6 +139,7 @@ form?.addEventListener('submit', event => {
   event.preventDefault(); void runSearch(query.value.trim());
 });
 
+// обновляем число статей и узнаём, загружен ли словарь исправлений
 /** @returns {Promise<boolean>} */
 async function updateHealth() {
   const value = await api('/api/health');

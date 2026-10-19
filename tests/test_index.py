@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 from qdrant_client import QdrantClient
 
-from chunking import ChunkingConfig, chunk_article
-from embeddings import EmbeddingAPIError
-from index import VECTOR_SIZE, collection_name, ensure_collection, index_chunks, main
-from prepare import PreparedArticle
+from habr_search.ingestion.chunking import ChunkingConfig, chunk_article
+from habr_search.embeddings import EmbeddingAPIError
+from habr_search.ingestion.index import VECTOR_SIZE, collection_name, ensure_collection, index_chunks, main
+from habr_search.ingestion.prepare import PreparedArticle
 
 
 # простой токенизатор для тестов считает символы вместо токенов настоящей модели
@@ -77,9 +77,9 @@ class IndexTests(unittest.TestCase):
     def test_invalid_timeout_is_rejected_before_accessing_inputs(self) -> None:
         for value in ['0', '-1', 'nan', 'inf']:
             with (self.subTest(value=value), patch('sys.argv', ['index.py', '--timeout', value]),
-                  patch('index.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
-                  patch('index.connect_store', side_effect=AssertionError('qdrant не нужен')),
-                  patch('index.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.ingestion.index.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
+                  patch('habr_search.ingestion.index.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('habr_search.ingestion.index.read_api_key', side_effect=AssertionError('ключ не нужен')),
                   redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
                 main()
             self.assertEqual(error.exception.code, 2)
@@ -101,10 +101,10 @@ class IndexTests(unittest.TestCase):
                     '--limit', '1', '--timeout', '420']
             store = QdrantClient(path=str(storage))
             with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
-                  patch('index.load_tokenizer', return_value=CharacterTokenizer()),
-                  patch('index.connect_store', return_value=store),
-                  patch('index.read_api_key', return_value='test-key'),
-                  patch('index.EmbeddingsClient', return_value=backend) as factory,
+                  patch('habr_search.ingestion.index.load_tokenizer', return_value=CharacterTokenizer()),
+                  patch('habr_search.ingestion.index.connect_store', return_value=store),
+                  patch('habr_search.ingestion.index.read_api_key', return_value='test-key'),
+                  patch('habr_search.ingestion.index.EmbeddingsClient', return_value=backend) as factory,
                   redirect_stdout(io.StringIO())):
                 self.assertEqual(main(), 0)
                 self.assertEqual(factory.call_args.args[0].timeout_seconds, 420.0)
@@ -191,9 +191,9 @@ class IndexTests(unittest.TestCase):
             before = source.read_bytes()
             argv = ['index.py', '--source', str(source), '--dry-run', '--limit', '1']
             with (patch('sys.argv', argv),
-                  patch('index.load_tokenizer', return_value=CharacterTokenizer()),
-                  patch('index.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                  patch('index.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('habr_search.ingestion.index.load_tokenizer', return_value=CharacterTokenizer()),
+                  patch('habr_search.ingestion.index.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  patch('habr_search.ingestion.index.connect_store', side_effect=AssertionError('qdrant не нужен')),
                   redirect_stdout(io.StringIO())):
                 self.assertEqual(main(), 0)
             self.assertEqual(before, source.read_bytes())

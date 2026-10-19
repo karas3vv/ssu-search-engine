@@ -1,11 +1,11 @@
 # Триграммы и исправление опечаток
 
-`spelling.py` содержит алгоритм и чтение словаря, `spellcheck.py` — команды его построения и проверки. Модуль работает перед семантическим поиском. Векторы статей не пересчитываются.
+`habr_search/retrieval/spelling.py` содержит алгоритм и чтение словаря, `habr_search/retrieval/spellcheck.py` — команды его построения и проверки. Модуль работает перед семантическим поиском. Векторы статей не пересчитываются.
 
 ## Словарь
 
 ```bash
-python spellcheck.py build --qdrant-url http://127.0.0.1:6333
+python -m habr_search.retrieval.spellcheck build --qdrant-url http://127.0.0.1:6333
 ```
 
 Команда читает заголовки и тексты уже проиндексированных фрагментов. Частота слова равна числу разных статей с этим словом: повтор заголовка и перекрытие фрагментов не увеличивают её. Регистр и `ё/е` объединяются при сопоставлении; исходный текст запроса сохраняется.
@@ -15,7 +15,7 @@ python spellcheck.py build --qdrant-url http://127.0.0.1:6333
 Существующий файл не перезаписывается. Для нового индекса создайте другой словарь:
 
 ```bash
-python spellcheck.py build --qdrant-url http://127.0.0.1:6333 \
+python -m habr_search.retrieval.spellcheck build --qdrant-url http://127.0.0.1:6333 \
   --dictionary data/spelling-next.sqlite3
 ```
 
@@ -39,7 +39,7 @@ python spellcheck.py build --qdrant-url http://127.0.0.1:6333 \
 ## Проверка без модели
 
 ```bash
-python spellcheck.py suggest --query "автоматизаця документов"
+python -m habr_search.retrieval.spellcheck suggest --query "автоматизаця документов"
 ```
 
 Печатаются исходная фраза, предложенная фраза и кандидаты с числом правок и частотой. На текущих 500 статьях построен словарь из 81 088 слов. Проверены примеры `автоматизаця` → `автоматизация`, `автмоатизация` → `автоматизация`, `слвоам` → `словам`. «серверо» остаётся без замены, потому что подходит несколько слов. Это проверки поведения, а не статистическая оценка исправлений.
@@ -49,14 +49,14 @@ python spellcheck.py suggest --query "автоматизаця документ�
 По умолчанию поиск работает с исходным запросом, как раньше. Показать предложения и искать исходную фразу:
 
 ```bash
-python search.py --query "автоматизаця документов" \
+python -m habr_search.retrieval.search --query "автоматизаця документов" \
   --qdrant-url http://127.0.0.1:6333 --spelling-mode suggest
 ```
 
 Применить однозначные исправления и явно напечатать использованный запрос:
 
 ```bash
-python search.py --query "автоматизаця документов" \
+python -m habr_search.retrieval.search --query "автоматизаця документов" \
   --qdrant-url http://127.0.0.1:6333 --spelling-mode apply
 ```
 
@@ -67,7 +67,7 @@ python search.py --query "автоматизаця документов" \
 Подготовить исправленную копию dev-запросов без MWS:
 
 ```bash
-python spellcheck.py prepare-evaluation --queries evaluation/queries_dev.csv \
+python -m habr_search.retrieval.spellcheck prepare-evaluation --queries evaluation/queries_dev.csv \
   --output data/evaluation/queries-dev-corrected.csv
 ```
 
@@ -76,7 +76,7 @@ python spellcheck.py prepare-evaluation --queries evaluation/queries_dev.csv \
 Пользователь запускает получение выдачи для новой копии:
 
 ```bash
-python evaluate.py --queries data/evaluation/queries-dev-corrected.csv \
+python -m habr_search.evaluation.evaluate --queries data/evaluation/queries-dev-corrected.csv \
   --qdrant-url http://127.0.0.1:6333 --timeout 300 \
   --output data/evaluation/dev-semantic-corrected-500.csv
 ```

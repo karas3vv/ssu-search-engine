@@ -18,6 +18,8 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from habr_search.paths import DATA_DIR
+
 BASE: str = 'https://habr.com'
 AGENT: str = 'HabrStudyCrawler/0.1'
 ARTICLE: re.Pattern[str] = re.compile(r'^/ru/(?:articles|companies/[^/]+/articles)/(\d+)/$')
@@ -194,7 +196,7 @@ def main() -> int:
     # читаем настройки запуска
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--limit', type=int, default=8000, help='target total, including saved articles')
-    parser.add_argument('--data-dir', type=Path, default=Path(__file__).resolve().parent / 'data')
+    parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
     parser.add_argument('--delay', type=float, default=10)
     parser.add_argument('--feed', action='append', help='Habr article feed URL; repeatable')
     parser.add_argument('--save-html', action='store_true', help='also save gzip-compressed article HTML')
