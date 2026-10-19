@@ -23,6 +23,12 @@ QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages t
 MAX_QUERY_TOKENS: int = 1024
 
 
+def validate_min_score(value: float | None) -> None:
+    """порог косинусного сходства должен быть конечным числом от минус одного до одного."""
+    if value is not None and (not math.isfinite(value) or not -1 <= value <= 1):
+        raise ValueError('min-score должен быть конечным числом от -1 до 1')
+
+
 # результат представляет статью с её лучшим фрагментом
 @dataclass(frozen=True)
 class SearchResult:
@@ -60,15 +66,18 @@ def validate_collection(store: QdrantClient, name: str, vector_size: int = VECTO
 def search_articles(
     store: QdrantClient, name: str, vector: list[float], top_k: int = 5,
     vector_size: int = VECTOR_SIZE,
+    *, min_score: float | None = None,
 ) -> list[SearchResult]:
     if top_k < 1:
         raise ValueError('top-k должен быть положительным')
+    validate_min_score(min_score)
     if len(vector) != vector_size or not all(math.isfinite(value) for value in vector) or not any(vector):
         raise ValueError(f'нужен ненулевой конечный вектор размерности {vector_size}')
     # группируем на стороне qdrant: одна статья занимает только одну строку выдачи
     response = store.query_points_groups(
         collection_name=name, query=vector, group_by='article_id', group_size=1,
         limit=top_k, with_payload=['article_id', 'title', 'url', 'text'], with_vectors=False,
+        score_threshold=min_score,
     )
     results: list[SearchResult] = []
     for group in response.groups:
@@ -101,6 +110,7 @@ class CliArgs(argparse.Namespace):
     raw_query: bool
     spelling_mode: str
     spelling_db: Path
+    min_score: float | None
 
 
 # готовим запрос, получаем его вектор и печатаем найденные статьи
@@ -112,6 +122,7 @@ def main() -> int:
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного qdrant')
     parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
     parser.add_argument('--top-k', type=int, default=5, help='сколько разных статей показать')
+    parser.add_argument('--min-score', type=float, help='не показывать результаты ниже выбранного порога сходства')
     parser.add_argument('--max-tokens', type=int, default=1024, help='должно совпадать с настройкой индексатора')
     parser.add_argument('--overlap-tokens', type=int, default=128, help='должно совпадать с настройкой индексатора')
     parser.add_argument('--snippet-chars', type=int, default=400, help='длина отрывка в выводе')
@@ -123,6 +134,7 @@ def main() -> int:
     if args.top_k < 1 or args.snippet_chars < 1:
         parser.error('top-k и snippet-chars должны быть положительными')
     try:
+        validate_min_score(args.min_score)
         query = build_query(args.query, args.raw_query)
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
@@ -152,7 +164,7 @@ def main() -> int:
             key = read_api_key()
             with closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))) as embeddings:
                 vector = embeddings.embed([query])[0]
-            results = search_articles(store, name, vector, args.top_k)
+            results = search_articles(store, name, vector, args.top_k, min_score=args.min_score)
         print(f'коллекция: {name}')
         print(f'найдено статей: {len(results)}')
         for number, result in enumerate(results, 1):

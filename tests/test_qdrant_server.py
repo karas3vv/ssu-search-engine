@@ -68,6 +68,10 @@ class QdrantServerTests(unittest.TestCase):
                 results = search_articles(store, name, [1.0, 1.0, 1.0], 3, 3)
                 self.assertEqual([result.article_id for result in results], [1])
                 self.assertEqual(results[0].title, doc.title)
+                # порог применяется и при группировке на сервере, а не только во встроенном режиме
+                threshold = (results[0].score + 1.0) / 2
+                self.assertEqual(search_articles(store, name, [1.0, 1.0, 1.0], 3, 3,
+                                                 min_score=threshold), [])
                 # имитируем новую версию статьи с меньшим числом фрагментов
                 index_chunks(chunks[:1], doc.text_hash, store, name, backend, 2, 3)
                 self.assertEqual(store.count(name, exact=True).count, 1)

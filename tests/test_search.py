@@ -22,6 +22,31 @@ def point(point_id: int, article_id: int, vector: list[float], text: str) -> mod
 
 # группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class SearchTests(unittest.TestCase):
+    # порог отсекает статьи по лучшему фрагменту и допускает пустую выдачу
+    def test_threshold_filters_groups_without_modifying_index(self) -> None:
+        with closing(QdrantClient(':memory:')) as store:
+            ensure_collection(store, 'test', 3)
+            store.upsert('test', points=[
+                point(1, 1, [0.6, 0.8, 0.0], 'сильный'),
+                point(2, 1, [0.0, 1.0, 0.0], 'слабый того же автора'),
+                point(3, 2, [0.0, 1.0, 0.0], 'другая статья'),
+            ])
+            before = store.scroll('test', with_vectors=True)
+            found = search_articles(store, 'test', [1.0, 0.0, 0.0], 5, 3, min_score=0.5)
+            self.assertEqual([item.article_id for item in found], [1])
+            self.assertEqual(found[0].text, 'сильный')
+            self.assertEqual(search_articles(store, 'test', [1.0, 0.0, 0.0], 5, 3, min_score=0.7), [])
+            self.assertEqual(store.scroll('test', with_vectors=True), before)
+
+    # неверный порог отклоняется до подключения, загрузки токенизатора и запроса ключа
+    def test_invalid_threshold_stops_before_resources_or_payment(self) -> None:
+        for value in ['nan', 'inf', '-1.1', '1.1']:
+            with (self.subTest(value=value), patch('sys.argv', ['search', '--query', 'тест', f'--min-score={value}']),
+                  patch('habr_search.retrieval.search.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  patch('habr_search.retrieval.search.read_api_key', side_effect=AssertionError('ключ не нужен')),
+                  redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
+                main()
+
     # проверяем поисковую инструкцию модели и режим уже подготовленного сервером запроса
     def test_query_instruction_and_raw_mode(self) -> None:
         self.assertEqual(build_query('  запрос  '), f'<instruct>{QUERY_INSTRUCTION}\n<query>запрос')

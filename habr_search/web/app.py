@@ -24,7 +24,9 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
 from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
 from habr_search.ingestion.index import EmbeddingProvider, collection_name
-from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
+from habr_search.retrieval.search import (
+    MAX_QUERY_TOKENS, build_query, search_articles, validate_collection, validate_min_score,
+)
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, SpellingDictionary, load_dictionary
 from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 from qdrant_client import QdrantClient
@@ -102,7 +104,8 @@ class SearchService:
     # проверяем совместимость индекса и словаря до обработки пользовательских запросов
     def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
                  embeddings: EmbeddingProvider, dictionary: SpellingDictionary | None,
-                 raw_query: bool = False) -> None:
+                 raw_query: bool = False, min_score: float | None = None) -> None:
+        validate_min_score(min_score)
         validate_collection(store, name)
         points = store.count(name, exact=True).count
         if dictionary is not None:
@@ -118,6 +121,7 @@ class SearchService:
         self.embeddings: EmbeddingProvider = embeddings
         self.dictionary: SpellingDictionary | None = dictionary
         self.raw_query: bool = raw_query
+        self.min_score: float | None = min_score
         self.lock: Lock = Lock()
         self.status: HealthResponse = HealthResponse(
             collection=name, fragments=points, articles=dictionary.info.articles if dictionary else None,
@@ -182,7 +186,7 @@ class SearchService:
                 raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов')
             # только этот вызов обращается к модели; повторов и фоновых поисков нет
             vector = self.embeddings.embed([prepared])[0]
-            found = search_articles(self.store, self.name, vector, request.top_k)
+            found = search_articles(self.store, self.name, vector, request.top_k, min_score=self.min_score)
             results: list[ArticleResponse] = []
             for item in found:
                 text = ' '.join(item.text.split())
@@ -209,6 +213,7 @@ class WebConfig:
     dictionary_file: Path | None = DEFAULT_DICTIONARY
     chunking: ChunkingConfig = ChunkingConfig()
     raw_query: bool = False
+    min_score: float | None = None  # выбранный порог задаёт сервер, а не браузер
 
 
 def connect_service(config: WebConfig) -> SearchService:
@@ -222,7 +227,7 @@ def connect_service(config: WebConfig) -> SearchService:
         dictionary = load_dictionary(config.dictionary_file) if config.dictionary_file is not None else None
         embeddings = EmbeddingsClient(config.embeddings)
         resources.callback(embeddings.close)
-        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query)
+        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query, config.min_score)
         service.resources = resources.pop_all()
         return service
 
@@ -310,6 +315,7 @@ class CliArgs(argparse.Namespace):
     raw_query: bool
     max_tokens: int
     overlap_tokens: int
+    min_score: float | None
 
 
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
@@ -326,10 +332,12 @@ def main() -> int:
     parser.add_argument('--raw-query', action='store_true')
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
+    parser.add_argument('--min-score', type=float, help='проверенный порог сходства; по умолчанию выключен')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not 1 <= args.port <= 65535 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('нужны допустимый port и положительный конечный timeout')
     try:
+        validate_min_score(args.min_score)
         store = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if store.path is not None and not store.path.is_dir():
             raise ValueError('локальный qdrant не найден; укажите --qdrant-url')
@@ -338,7 +346,7 @@ def main() -> int:
         embeddings = EmbeddingConfig(key, os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
                                      os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL), args.timeout)
         config = WebConfig(store, embeddings, args.tokenizer_file,
-                           None if args.without_spelling else args.spelling_db, chunking, args.raw_query)
+                           None if args.without_spelling else args.spelling_db, chunking, args.raw_query, args.min_score)
         print(f'страница поиска: http://127.0.0.1:{args.port}')
         print('получение выдачи обращается к mws; открытие страницы и проверка опечаток — нет')
         uvicorn.run(create_app(lambda: connect_service(config)), host='127.0.0.1', port=args.port,

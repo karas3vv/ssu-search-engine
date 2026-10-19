@@ -34,6 +34,23 @@ def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
 
 # проверяем страницу, форматы api, обработку ошибок и число вызовов модели
 class WebTests(unittest.TestCase):
+    # порог сервера разрешает пустую выдачу без повторного обращения к модели
+    def test_server_threshold_returns_empty_results_with_one_embedding_call(self) -> None:
+        with closing(QdrantClient(':memory:')) as store:
+            initial, embeddings = make_service(store)
+            store.upsert('test', [models.PointStruct(
+                id=i, vector=[0.0, 1.0] + [0.0] * (VECTOR_SIZE - 2), payload={
+                    'article_id': i, 'title': 'другая тема', 'url': f'https://habr.com/ru/articles/{i}/', 'text': 'текст',
+                }) for i in range(1, 4)])
+            service = SearchService(store, 'test', CharacterTokenizer(), embeddings, initial.dictionary, min_score=0.5)
+            service.resources.callback(embeddings.close)
+            with TestClient(create_app(lambda: service)) as client:
+                response = client.post('/api/search', json={'query': 'python'})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['results'], [])
+                self.assertEqual(len(embeddings.calls), 1)
+                self.assertEqual(store.count('test', exact=True).count, 3)
+
     # словарь старого формата отключает подсказки при запуске, но позволяет искать статьи
     def test_legacy_dictionary_keeps_original_search_available(self) -> None:
         with closing(QdrantClient(':memory:')) as store:

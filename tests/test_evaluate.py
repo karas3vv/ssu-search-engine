@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ from qdrant_client import QdrantClient, models
 from habr_search.ingestion.chunking import ChunkingConfig
 from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError
 from habr_search.evaluation.evaluate import (
-    DEFAULT_QUERIES, QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, ReportContext, ReportEntry,
+    DEFAULT_QUERIES, QUERY_COLUMNS, REPORT_COLUMNS, PRE_SCORE_COLUMNS, EvaluationQuery, ReportContext, ReportEntry,
     evaluate_queries, load_queries, load_report, main, prepare_queries, query_set_hash,
     report_row, score_ranking, summarize, validate_expected_articles,
 )
@@ -104,7 +105,7 @@ class EvaluationTests(unittest.TestCase):
     def test_report_resume_accepts_empty_header_and_valid_misses(self) -> None:
         case = EvaluationQuery('one', 'exact', 'запрос', (1,))
         context = ReportContext('test', 1, query_set_hash([case]), False, 5)
-        entry = ReportEntry('2026-10-19T09:00:00+00:00', score_ranking(case, [], 5))
+        entry = ReportEntry('2026-10-19T09:00:00+00:00', replace(score_ranking(case, [], 5), scores=()))
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'report.csv'
             with source.open('w', encoding='utf-8', newline='') as output:
@@ -117,6 +118,47 @@ class EvaluationTests(unittest.TestCase):
                 csv.writer(output).writerow(report_row(entry, context))
             with self.assertRaises(ValueError):
                 load_report(source, [case], context)
+
+    # новые отчёты сохраняют оценки, старые читаются без выдумывания недостающих чисел
+    def test_report_scores_roundtrip_legacy_and_corruption(self) -> None:
+        case = EvaluationQuery('one', 'exact', 'запрос', (1,))
+        context = ReportContext('test', 2, query_set_hash([case]), False, 5)
+        entry = ReportEntry('2026-10-19T09:00:00+00:00',
+                            replace(score_ranking(case, [1, 2], 5), scores=(0.8, 0.3)))
+        row = report_row(entry, context)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'report.csv'
+            for columns in [REPORT_COLUMNS, PRE_SCORE_COLUMNS]:
+                with path.open('w', encoding='utf-8', newline='') as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(columns)
+                    writer.writerow(row[:len(columns)])
+                result = load_report(path, [case], context)['one'].result
+                self.assertEqual(result.scores, (0.8, 0.3) if columns == REPORT_COLUMNS else None)
+                with self.assertRaises(ValueError):
+                    load_report(path, [case], replace(context, min_score=0.5))
+            for invalid in ['0.8', 'nan;0.3', '1.1;0.3']:
+                changed = row.copy()
+                changed[REPORT_COLUMNS.index('retrieved_scores')] = invalid
+                with path.open('w', encoding='utf-8', newline='') as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(REPORT_COLUMNS)
+                    writer.writerow(changed)
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    load_report(path, [case], context)
+
+    # оценка с порогом записывает пустой результат и не повторяет платный запрос
+    def test_evaluation_threshold_records_scores_and_uses_one_call(self) -> None:
+        case = EvaluationQuery('find', 'exact', 'запрос', (1,))
+        backend = FakeEmbeddings()
+        with closing(QdrantClient(':memory:')) as store:
+            ensure_collection(store, 'test', 3)
+            add_point(store, 1, 1, [0.0, 1.0, 0.0])
+            results = list(evaluate_queries(prepare_queries([case], CharacterTokenizer()),
+                                           store, 'test', backend, 5, 3, min_score=0.5))
+            self.assertEqual(results[0].retrieved_ids, ())
+            self.assertEqual(results[0].scores, ())
+            self.assertEqual(len(backend.calls), 1)
 
     # проверяем метрики при разных местах, нескольких подходящих статьях и пропусках
     def test_metrics_handle_misses_cutoff_and_multiple_relevant_articles(self) -> None:

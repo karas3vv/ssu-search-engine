@@ -11,7 +11,7 @@ import os
 import re
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -23,7 +23,9 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
 from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
 from habr_search.ingestion.index import VECTOR_SIZE, EmbeddingProvider, collection_name
-from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
+from habr_search.retrieval.search import (
+    MAX_QUERY_TOKENS, build_query, search_articles, validate_collection, validate_min_score,
+)
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import UNVERSIONED, index_revision
 
@@ -35,8 +37,10 @@ QUERY_COLUMNS: tuple[str, ...] = ('query_id', 'category', 'query', 'relevant_art
 REPORT_COLUMNS: tuple[str, ...] = (
     'started_at', 'collection', 'collection_points', 'query_set_sha256', 'raw_query', 'top_k',
     'query_id', 'category', 'query', 'relevant_article_ids', 'retrieved_article_ids',
-    'first_relevant_rank', 'reciprocal_rank', 'index_revision', 'elapsed_ms',
+    'first_relevant_rank', 'reciprocal_rank', 'index_revision', 'elapsed_ms', 'retrieved_scores', 'min_score',
 )
+# прежние отчёты пригодны для просмотра и продолжения без порога, но не для его подбора
+PRE_SCORE_COLUMNS: tuple[str, ...] = REPORT_COLUMNS[:-2]
 
 
 # контрольный запрос и список известных подходящих статей для него
@@ -55,6 +59,7 @@ class QueryEvaluation:
     retrieved_ids: tuple[int, ...]  # статьи в порядке выдачи, ограниченные top-k
     first_relevant_rank: int | None  # место первой подходящей статьи или none при отсутствии
     elapsed_ms: float | None = None  # время модели и поиска; none означает, что длительность не измерялась
+    scores: tuple[float, ...] | None = None  # оценки в порядке retrieved_ids; старые отчёты их не содержат
 
     # превращаем место в число для mrr: первое место даёт 1, отсутствие даёт 0
     @property
@@ -82,6 +87,7 @@ class ReportContext:
     raw_query: bool  # передаём запрос без добавления инструкции на стороне клиента
     top_k: int  # сколько первых статей учитывается в метриках
     index_revision: str = UNVERSIONED  # версия содержимого, а не только число точек
+    min_score: float | None = None  # порог также должен совпасть при продолжении отчёта
 
 
 # результат проверки вместе с временем начала исходного запуска
@@ -209,10 +215,11 @@ def validate_expected_articles(store: QdrantClient, name: str, cases: Sequence[E
 def evaluate_queries(
     prepared: Sequence[tuple[EvaluationQuery, str]], store: QdrantClient, name: str,
     embeddings: EmbeddingProvider, top_k: int = 5, vector_size: int = VECTOR_SIZE,
-    *, expected_revision: str | None = None,
+    *, expected_revision: str | None = None, min_score: float | None = None,
 ) -> Iterator[QueryEvaluation]:
     if top_k < 1:
         raise ValueError('top-k должен быть положительным')
+    validate_min_score(min_score)
     revision = expected_revision if expected_revision is not None else index_revision(store, name)
     for case, text in prepared:
         if index_revision(store, name) != revision:
@@ -223,12 +230,12 @@ def evaluate_queries(
             vector = embeddings.embed([text])[0]
         except EmbeddingAPIError as exc:
             raise EmbeddingAPIError(f'{case.query_id}: {exc}') from None
-        found = search_articles(store, name, vector, top_k, vector_size)
+        found = search_articles(store, name, vector, top_k, vector_size, min_score=min_score)
         if index_revision(store, name) != revision:
             raise ValueError('индекс изменился во время запроса; результат не записан')
         result = score_ranking(case, [item.article_id for item in found], top_k)
         yield QueryEvaluation(case, result.retrieved_ids, result.first_relevant_rank,
-                              (perf_counter() - started) * 1000)
+                              (perf_counter() - started) * 1000, tuple(item.score for item in found))
 
 
 # фиксируем состав, порядок запросов и разметку одним отпечатком
@@ -251,6 +258,8 @@ def report_row(entry: ReportEntry, context: ReportContext) -> list[str | int | f
         ';'.join(map(str, result.case.relevant_ids)), ';'.join(map(str, result.retrieved_ids)),
         rank if rank is not None else '', result.reciprocal_rank,
         context.index_revision, '' if result.elapsed_ms is None else result.elapsed_ms,
+        '' if result.scores is None else ';'.join(map(str, result.scores)),
+        '' if context.min_score is None else context.min_score,
     ]
 
 
@@ -264,12 +273,12 @@ def load_report(
     with path.open(encoding='utf-8-sig', newline='') as source:
         rows = csv.reader(source, strict=True)
         header = next(rows, None)
-        if header is None or tuple(header) != REPORT_COLUMNS:
+        if header is None or tuple(header) not in (REPORT_COLUMNS, PRE_SCORE_COLUMNS):
             raise ValueError('resume: неверный формат отчёта; новый формат содержит версию индекса и время запроса')
         for number, values in enumerate(rows, 2):
-            if len(values) != len(REPORT_COLUMNS):
+            if len(values) != len(header):
                 raise ValueError(f'resume: строка {number} неполная; исходный отчёт не изменён')
-            row = dict(zip(REPORT_COLUMNS, values))
+            row = dict(zip(header, values))
             identifier = row['query_id']
             case = by_id.get(identifier)
             if case is None or identifier in saved:
@@ -281,8 +290,9 @@ def load_report(
                 'top_k': str(context.top_k), 'category': case.category, 'query': case.query,
                 'relevant_article_ids': ';'.join(map(str, case.relevant_ids)),
                 'index_revision': context.index_revision,
+                'min_score': '' if context.min_score is None else str(context.min_score),
             }
-            if any(row[key] != value for key, value in expected_metadata.items()):
+            if any(row.get(key, '') != value for key, value in expected_metadata.items()):
                 raise ValueError(f'resume: {identifier}: настройки, индекс или набор запросов отличаются от отчёта')
             started = datetime.fromisoformat(row['started_at'])
             if started.tzinfo is None:
@@ -294,7 +304,16 @@ def load_report(
             elapsed = float(row['elapsed_ms']) if row['elapsed_ms'] else None
             if elapsed is not None and (not math.isfinite(elapsed) or elapsed < 0):
                 raise ValueError(f'resume: {identifier}: неверное время запроса')
-            result = QueryEvaluation(case, result.retrieved_ids, result.first_relevant_rank, elapsed)
+            raw_scores = row.get('retrieved_scores')
+            scores: tuple[float, ...] | None = None
+            if raw_scores is not None and (raw_scores or not result.retrieved_ids):
+                scores = tuple(map(float, raw_scores.split(';'))) if raw_scores else ()
+                if (len(scores) != len(result.retrieved_ids)
+                        or any(not math.isfinite(score) or not -1.000001 <= score <= 1.000001 for score in scores)):
+                    raise ValueError(f'resume: {identifier}: неверные оценки сходства')
+                if context.min_score is not None and any(score + 1e-6 < context.min_score for score in scores):
+                    raise ValueError(f'resume: {identifier}: результат ниже порога из отчёта')
+            result = replace(result, elapsed_ms=elapsed, scores=scores)
             rank = str(result.first_relevant_rank) if result.first_relevant_rank is not None else ''
             # сверяем сохранённые метрики с выдачей, чтобы не принять повреждённую строку
             if row['first_relevant_rank'] != rank or not math.isclose(
@@ -320,6 +339,7 @@ class CliArgs(argparse.Namespace):
     overlap_tokens: int
     raw_query: bool
     dry_run: bool
+    min_score: float | None
 
 
 # проверяем входные данные, продолжаем нужные запросы, записываем отчёт и считаем метрики
@@ -332,6 +352,7 @@ def main() -> int:
                         help='ожидание ответа MWS в секундах, по умолчанию 300')
     parser.add_argument('--limit', type=int, help='сколько первых запросов проверить')
     parser.add_argument('--top-k', type=int, default=5)
+    parser.add_argument('--min-score', type=float, help='порог сходства; по умолчанию выдача не отсекается')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
@@ -346,6 +367,7 @@ def main() -> int:
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error('timeout должен быть положительным конечным числом')
     try:
+        validate_min_score(args.min_score)
         cases = load_queries(args.queries)
         if args.limit is not None:
             cases = cases[:args.limit]
@@ -376,7 +398,8 @@ def main() -> int:
             validate_expected_articles(store, name, cases)
             point_count = store.count(name, exact=True).count
             revision = index_revision(store, name)
-            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k, revision)
+            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k,
+                                    revision, args.min_score)
             saved = load_report(args.resume, cases, context) if args.resume is not None else {}
             # оставляем для модели только запросы без готового результата
             pending = [case for case in cases if case.query_id not in saved]
@@ -409,7 +432,7 @@ def main() -> int:
                     if index_revision(store, name) != revision:
                         raise ValueError('версия индекса изменилась до начала оценки')
                     for result in evaluate_queries(prepared, store, name, backend, args.top_k,
-                                                   expected_revision=revision):
+                                                   expected_revision=revision, min_score=args.min_score):
                         rank = result.first_relevant_rank
                         writer.writerow(report_row(ReportEntry(started.isoformat(), result), context))
                         report.flush()  # при ошибке уже завершённые проверки останутся в отчёте

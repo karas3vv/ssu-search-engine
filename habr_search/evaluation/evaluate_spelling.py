@@ -12,10 +12,11 @@ from pathlib import Path
 
 from habr_search.retrieval import spelling
 from habr_search.evaluation.evaluate import (
-    QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, QueryEvaluation, ReportContext,
+    QUERY_COLUMNS, REPORT_COLUMNS, PRE_SCORE_COLUMNS, EvaluationQuery, QueryEvaluation, ReportContext,
     load_queries, load_report, query_set_hash, print_summary,
 )
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, SpellingDictionary, load_dictionary
+from habr_search.retrieval.search import validate_min_score
 
 from habr_search.paths import PROJECT_ROOT as ROOT
 
@@ -102,16 +103,20 @@ def read_complete_report(path: Path, cases: Sequence[EvaluationQuery]) -> tuple[
     """повторно используем строгую проверку строк и метрик из evaluate.py."""
     with path.open(encoding='utf-8-sig', newline='') as source:
         reader = csv.reader(source, strict=True)
-        if tuple(next(reader, list[str]())) != REPORT_COLUMNS:
+        header = tuple(next(reader, list[str]()))
+        if header not in (REPORT_COLUMNS, PRE_SCORE_COLUMNS):
             raise ValueError('неверный формат поискового отчёта')
         first = next(reader, list[str]())
-        if len(first) != len(REPORT_COLUMNS):
+        if len(first) != len(header):
             raise ValueError('отчёт не содержит завершённых запросов')
-        values = dict(zip(REPORT_COLUMNS, first))
+        values = dict(zip(header, first))
     if values['raw_query'] not in ('True', 'False'):
         raise ValueError('неверный режим инструкции в отчёте')
+    raw_score = values.get('min_score', '')
+    min_score = float(raw_score) if raw_score else None
+    validate_min_score(min_score)
     context = ReportContext(values['collection'], int(values['collection_points']), query_set_hash(cases),
-                            values['raw_query'] == 'True', int(values['top_k']), values['index_revision'])
+                            values['raw_query'] == 'True', int(values['top_k']), values['index_revision'], min_score)
     if context.collection_points < 1 or context.top_k < 1 or not context.index_revision:
         raise ValueError('неверное число точек, top-k или версия индекса')
     entries = load_report(path, cases, context)
