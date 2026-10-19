@@ -75,6 +75,27 @@ class EmbeddingsTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_timeout_uses_configured_wait_without_automatic_retry(self) -> None:
+        config = EmbeddingConfig(api_key='test-key-not-real', timeout_seconds=420.0)
+        client = EmbeddingsClient(config)
+        try:
+            cases: list[tuple[requests.Timeout, str]] = [
+                (requests.ConnectTimeout('private details'), 'подключения к MWS \\(10 с\\)'),
+                (requests.ReadTimeout('private details'), 'данных ответа MWS \\(420 с\\)'),
+                (requests.Timeout('private details'), 'ожидание ответа: 420 с'),
+            ]
+            for error, message in cases:
+                with (self.subTest(error=type(error).__name__),
+                      patch.object(client.session, 'post', side_effect=error) as post):
+                    with self.assertRaisesRegex(EmbeddingAPIError, message) as caught:
+                        client.embed(['текст'])
+                    self.assertEqual(post.call_count, 1)
+                    self.assertEqual(post.call_args.kwargs['timeout'], (10, 420.0))
+                    self.assertNotIn('private details', str(caught.exception))
+                    self.assertNotIn('test-key-not-real', str(caught.exception))
+        finally:
+            client.close()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -118,8 +118,20 @@ class EmbeddingsClient:
                 timeout=(10, self.config.timeout_seconds),
                 allow_redirects=False,
             )
+        except requests.ConnectTimeout:
+            raise EmbeddingAPIError(
+                'тайм-аут подключения к MWS (10 с); запрос автоматически не повторяется'
+            ) from None
+        except requests.ReadTimeout:
+            raise EmbeddingAPIError(
+                f'тайм-аут ожидания данных ответа MWS ({self.config.timeout_seconds:g} с); '
+                'запрос автоматически не повторяется'
+            ) from None
         except requests.Timeout:
-            raise EmbeddingAPIError('сервер не ответил вовремя; запрос автоматически не повторяется') from None
+            raise EmbeddingAPIError(
+                f'истёк тайм-аут MWS (подключение: 10 с; ожидание ответа: {self.config.timeout_seconds:g} с); '
+                'запрос автоматически не повторяется'
+            ) from None
         except requests.RequestException:
             # исходное исключение и тело ответа могут содержать лишние служебные данные
             raise EmbeddingAPIError('не удалось подключиться к api; проверьте сеть и адрес сервера') from None
