@@ -72,4 +72,5 @@ python -m pyright
 - [Архитектура и хранение данных](docs/ARCHITECTURE.md)
 - [Оценка качества поиска](docs/evaluation/README.md)
 - [Расширенная проверка и ручная разметка](docs/evaluation/BENCHMARK.md)
+- [Порог сходства и запросы без ответа](docs/evaluation/THRESHOLDS.md)
 - [Проверка опечаточника](docs/evaluation/SPELLING_BENCHMARK.md)

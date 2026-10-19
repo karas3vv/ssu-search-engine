@@ -35,6 +35,7 @@ python -m habr_search.web.app --qdrant-url http://127.0.0.1:6333 --timeout 300
 - `--port 8001` — другой локальный порт;
 - `--spelling-db data/spelling-next.sqlite3` — другой заранее построенный словарь;
 - `--without-spelling` — запуск без словаря и исправлений;
+- `--min-score` — проверенный [порог сходства](evaluation/THRESHOLDS.md); по умолчанию выключен;
 - `--tokenizer-file путь/tokenizer.json` — локальный токенизатор Gemma;
 - `--max-tokens`, `--overlap-tokens`, `--raw-query` — как в `habr_search/retrieval/search.py`, должны соответствовать индексу и настройке сервера модели;
 - `--qdrant-path` — встроенный режим вместо сервера; другим командам нельзя открывать эту папку одновременно.
