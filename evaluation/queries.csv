@@ -1,0 +1,19 @@
+query_id,category,query,relevant_article_ids
+word_python_exact,exact,Как создавать документы Word из данных Excel на Python?,795057;888510
+positions_exact,exact,Как автоматически заполнять должности сотрудников в Excel?,891074
+rpa_exact,exact,Как автоматизировать действия через Power Automate Desktop?,575278
+word_python_paraphrase,paraphrase,Как брать строки из таблицы и автоматически делать отдельный документ по шаблону?,795057;888510
+word_python_alias,alias,Как заполнить шаблон ворда данными из экселя на питоне?,795057;888510
+positions_paraphrase,paraphrase,Как определить должность человека на нужную дату с учётом его карьерных перемещений?,891074
+positions_alias,alias,Как в экселе найти должность сотрудника по ФИО и дате?,891074
+rpa_paraphrase,paraphrase,"Как сделать робота, который повторяет действия пользователя в браузере и таблицах?",575278
+rpa_alias,alias,Как настроить автоматизацию через PAD?,575278
+macro_exact,exact,Для чего используется ExecuteExcel4Macro?,717902
+macro_paraphrase,paraphrase,Как автоматизировать подбор кандидатов с помощью файлов Excel и документов на SharePoint?,717902
+reports_exact,exact,Как массово создавать однотипные отчёты в Word с разными ФИО и датами?,888510
+reports_paraphrase,paraphrase,"Как сформировать много одинаковых документов, меняя только данные людей и список работ?",888510
+python_excel_exact,exact,Как работает Python in Excel в облаке?,821879
+python_excel_paraphrase,paraphrase,"Почему Python для Excel запускают на сервере, а не устанавливают каждому сотруднику?",821879
+word_python_typo,typo,Как создавать отчеты Word из Excel на Pyhton?,795057;888510
+positions_typo,typo,Как автомотически заполнять должности сотруднков в Excel?,891074
+rpa_typo,typo,Как автоматизировать действия через Power Automte Desktop?,575278
