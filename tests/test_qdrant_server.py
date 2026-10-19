@@ -10,8 +10,6 @@ from uuid import uuid4
 from habr_search.ingestion.chunking import ChunkingConfig, chunk_article
 from habr_search.ingestion.index import ensure_collection, index_chunks
 from habr_search.ingestion.prepare import PreparedArticle
-from habr_search.ingestion.pipeline import index_articles
-from tests.test_index import article
 from habr_search.retrieval.search import search_articles, validate_collection
 from habr_search.vector_store import QdrantConfig, connect_store
 
@@ -44,28 +42,6 @@ class TestEmbeddings:
 # группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 @unittest.skipUnless(TEST_URL, 'задайте QDRANT_TEST_URL для проверки настоящего сервера')
 class QdrantServerTests(unittest.TestCase):
-    # новая очередь пишет общие пакеты на настоящий сервер и продолжает их без вызова модели
-    def test_shared_queue_with_two_workers_and_resume(self) -> None:
-        name = f'test_habr_{uuid4().hex}'
-        config = QdrantConfig(url=TEST_URL, api_key=os.environ.get('QDRANT_TEST_API_KEY') or None)
-        docs = [article(f'синтетический текст {i}', i) for i in range(1, 10)]
-        with closing(connect_store(config)) as store:
-            try:
-                ensure_collection(store, name, 3, create_article_index=True)
-                backends = [TestEmbeddings(), TestEmbeddings()]
-                result = index_articles(docs, TestTokenizer(), ChunkingConfig(128, 12), store, name,
-                                        backends, 4, 3)
-                self.assertEqual((result.articles, result.saved, result.batches), (9, 9, 3))
-                self.assertEqual(sum(backend.calls for backend in backends), 3)
-                resumed = [TestEmbeddings(), TestEmbeddings()]
-                result = index_articles(docs, TestTokenizer(), ChunkingConfig(128, 12), store, name,
-                                        resumed, 8, 3)
-                self.assertEqual((result.saved, result.skipped), (0, 9))
-                self.assertEqual(sum(backend.calls for backend in resumed), 0)
-            finally:
-                if store.collection_exists(name):
-                    store.delete_collection(name)
-
     # на настоящем сервере проверяем запись, продолжение, поиск и удаление устаревших точек
     def test_http_index_resume_search_and_stale_cleanup(self) -> None:
         name = f'test_habr_{uuid4().hex}'

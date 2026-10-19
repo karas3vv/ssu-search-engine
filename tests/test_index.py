@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import signal
 import sqlite3
 import tempfile
 import unittest
@@ -63,17 +62,6 @@ class CliEmbeddings:
         self.closed = True
 
 
-class StoppingCliEmbeddings(CliEmbeddings):
-    """имитируем ctrl+c через установленный обработчик, не посылая сигнал другим процессам."""
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """запрашиваем остановку во время первого обращения и возвращаем готовые векторы."""
-        handler = signal.getsignal(signal.SIGINT)
-        if not callable(handler):
-            raise AssertionError('обработчик мягкой остановки не установлен')
-        handler(signal.SIGINT, None)
-        return super().embed(texts)
-
-
 # создаём подготовленную статью с известным текстом и отпечатком для теста
 def article(text: str, article_id: int = 1) -> PreparedArticle:
     return PreparedArticle(
@@ -85,50 +73,6 @@ def article(text: str, article_id: int = 1) -> PreparedArticle:
 
 # группа проверок модуля; каждый метод test_ описывает отдельный ожидаемый сценарий
 class IndexTests(unittest.TestCase):
-    # команда сохраняет ответ при ctrl+c, возвращает 130 и восстанавливает прежний обработчик
-    def test_cli_graceful_stop_saves_response_closes_client_and_restores_signal(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / 'source.sqlite3'
-            storage = Path(folder) / 'qdrant'
-            with closing(sqlite3.connect(source)) as db:
-                db.execute('CREATE TABLE articles (id INTEGER PRIMARY KEY, payload TEXT)')
-                for number in range(1, 7):
-                    db.execute('INSERT INTO articles VALUES (?,?)', (number, json.dumps({
-                        'id': number, 'url': f'https://habr.com/ru/articles/{number}/',
-                        'title': 'тест', 'text': f'текст {number}',
-                    })))
-                db.commit()
-            backend = StoppingCliEmbeddings()
-            previous_handler = signal.getsignal(signal.SIGINT)
-            argv = ['index', '--source', str(source), '--qdrant-path', str(storage),
-                    '--limit', '6', '--batch-size', '1', '--workers', '1']
-            store = QdrantClient(path=str(storage))
-            with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
-                  patch('habr_search.ingestion.index.load_tokenizer', return_value=CharacterTokenizer()),
-                  patch('habr_search.ingestion.index.connect_store', return_value=store),
-                  patch('habr_search.ingestion.index.read_api_key', return_value='test-key'),
-                  patch('habr_search.ingestion.index.EmbeddingsClient', return_value=backend),
-                  redirect_stdout(io.StringIO())):
-                self.assertEqual(main(), 130)
-            self.assertEqual(signal.getsignal(signal.SIGINT), previous_handler)
-            self.assertEqual(backend.calls, 1)
-            self.assertTrue(backend.closed)
-            with closing(QdrantClient(path=str(storage))) as reopened:
-                name = collection_name('https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings',
-                                       'parser', ChunkingConfig())
-                self.assertEqual(reopened.count(name, exact=True).count, 1)
-
-    # ошибочное число работников или размер пакета отклоняются до открытия корпуса и api
-    def test_invalid_queue_settings_stop_before_resources(self) -> None:
-        for option in ['--workers', '--batch-size']:
-            for value in ['0', '-1']:
-                with (self.subTest(option=option, value=value), patch('sys.argv', ['index', option, value]),
-                      patch('habr_search.ingestion.index.load_tokenizer', side_effect=AssertionError('токенизатор не нужен')),
-                      patch('habr_search.ingestion.index.read_api_key', side_effect=AssertionError('ключ не нужен')),
-                      redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
-                    main()
-                self.assertEqual(error.exception.code, 2)
-
     # неправильный тайм-аут отклоняется до чтения корпуса и получения ключа
     def test_invalid_timeout_is_rejected_before_accessing_inputs(self) -> None:
         for value in ['0', '-1', 'nan', 'inf']:
@@ -152,7 +96,7 @@ class IndexTests(unittest.TestCase):
                 })))
                 db.commit()
             before = source.read_bytes()
-            backends = [CliEmbeddings(), CliEmbeddings()]
+            backend = CliEmbeddings()
             argv = ['index.py', '--source', str(source), '--qdrant-path', str(storage),
                     '--limit', '1', '--timeout', '420']
             store = QdrantClient(path=str(storage))
@@ -160,12 +104,12 @@ class IndexTests(unittest.TestCase):
                   patch('habr_search.ingestion.index.load_tokenizer', return_value=CharacterTokenizer()),
                   patch('habr_search.ingestion.index.connect_store', return_value=store),
                   patch('habr_search.ingestion.index.read_api_key', return_value='test-key'),
-                  patch('habr_search.ingestion.index.EmbeddingsClient', side_effect=backends) as factory,
+                  patch('habr_search.ingestion.index.EmbeddingsClient', return_value=backend) as factory,
                   redirect_stdout(io.StringIO())):
                 self.assertEqual(main(), 0)
                 self.assertEqual(factory.call_args.args[0].timeout_seconds, 420.0)
-            self.assertTrue(all(backend.closed for backend in backends))
-            self.assertEqual(sum(backend.calls for backend in backends), 1)
+            self.assertTrue(backend.closed)
+            self.assertEqual(backend.calls, 1)
             self.assertEqual(before, source.read_bytes())
             with closing(QdrantClient(path=str(storage))) as reopened:
                 name = collection_name('https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings', 'parser', ChunkingConfig())
