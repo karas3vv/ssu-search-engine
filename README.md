@@ -67,6 +67,7 @@ python -m pyright
 
 ## Документация
 
+- [Сбор статей и повтор пропущенных ссылок](docs/SCRAPING.md)
 - [Интерфейс и API](docs/WEB.md)
 - [Архитектура и хранение данных](docs/ARCHITECTURE.md)
 - [Оценка качества поиска](docs/evaluation/README.md)
