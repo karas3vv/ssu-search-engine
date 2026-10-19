@@ -5,10 +5,11 @@ import argparse
 import csv
 import hashlib
 import io
+import math
 import os
 import re
 from collections.abc import Iterator, Sequence
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
-from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
+from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
 from index import VECTOR_SIZE, EmbeddingProvider, collection_name
 from search import MAX_QUERY_TOKENS, build_query, search_articles, validate_collection
 from vector_store import connect_store, resolve_qdrant_config
@@ -57,6 +58,21 @@ class EvaluationSummary:
     hits: int
     hit_rate: float  # доля запросов с подходящей статьёй в первых k результатах
     mrr: float  # среднее обратное место первой подходящей статьи в пределах k
+
+
+@dataclass(frozen=True)
+class ReportContext:
+    collection: str
+    collection_points: int
+    query_set_sha256: str
+    raw_query: bool
+    top_k: int
+
+
+@dataclass(frozen=True)
+class ReportEntry:
+    started_at: str
+    result: QueryEvaluation
 
 
 def load_queries(path: Path) -> list[EvaluationQuery]:
@@ -147,7 +163,10 @@ def evaluate_queries(
         raise ValueError('top-k должен быть положительным')
     for case, text in prepared:
         # каждый запрос векторизуется один раз, статьи повторно не обрабатываются
-        vector = embeddings.embed([text])[0]
+        try:
+            vector = embeddings.embed([text])[0]
+        except EmbeddingAPIError as exc:
+            raise EmbeddingAPIError(f'{case.query_id}: {exc}') from None
         found = search_articles(store, name, vector, top_k, vector_size)
         yield score_ranking(case, [result.article_id for result in found], top_k)
 
@@ -160,9 +179,66 @@ def query_set_hash(cases: Sequence[EvaluationQuery]) -> str:
     return hashlib.sha256(buffer.getvalue().encode()).hexdigest()
 
 
+def report_row(entry: ReportEntry, context: ReportContext) -> list[str | int | float]:
+    result = entry.result
+    rank = result.first_relevant_rank
+    return [
+        entry.started_at, context.collection, context.collection_points,
+        context.query_set_sha256, str(context.raw_query), context.top_k,
+        result.case.query_id, result.case.category, result.case.query,
+        ';'.join(map(str, result.case.relevant_ids)), ';'.join(map(str, result.retrieved_ids)),
+        rank if rank is not None else '', result.reciprocal_rank,
+    ]
+
+
+def load_report(
+    path: Path, cases: Sequence[EvaluationQuery], context: ReportContext,
+) -> dict[str, ReportEntry]:
+    # принимаем только результаты для того же набора, режима поиска и размера индекса
+    by_id = {case.query_id: case for case in cases}
+    saved: dict[str, ReportEntry] = {}
+    with path.open(encoding='utf-8-sig', newline='') as source:
+        rows = csv.reader(source, strict=True)
+        header = next(rows, None)
+        if header is None or tuple(header) != REPORT_COLUMNS:
+            raise ValueError('resume: неверный или отсутствующий заголовок отчёта')
+        for number, values in enumerate(rows, 2):
+            if len(values) != len(REPORT_COLUMNS):
+                raise ValueError(f'resume: строка {number} неполная; исходный отчёт не изменён')
+            row = dict(zip(REPORT_COLUMNS, values))
+            identifier = row['query_id']
+            case = by_id.get(identifier)
+            if case is None or identifier in saved:
+                raise ValueError(f'resume: неизвестный или повторный query_id {identifier}')
+            expected_metadata = {
+                'collection': context.collection, 'collection_points': str(context.collection_points),
+                'query_set_sha256': context.query_set_sha256, 'raw_query': str(context.raw_query),
+                'top_k': str(context.top_k), 'category': case.category, 'query': case.query,
+                'relevant_article_ids': ';'.join(map(str, case.relevant_ids)),
+            }
+            if any(row[key] != value for key, value in expected_metadata.items()):
+                raise ValueError(f'resume: {identifier}: настройки, индекс или набор запросов отличаются от отчёта')
+            started = datetime.fromisoformat(row['started_at'])
+            if started.tzinfo is None:
+                raise ValueError(f'resume: {identifier}: время в отчёте должно содержать часовой пояс')
+            parts = row['retrieved_article_ids'].split(';') if row['retrieved_article_ids'] else []
+            if len(parts) > context.top_k or any(not re.fullmatch(r'[1-9][0-9]*', value) for value in parts):
+                raise ValueError(f'resume: {identifier}: неверная выдача в отчёте')
+            result = score_ranking(case, [int(value) for value in parts], context.top_k)
+            rank = str(result.first_relevant_rank) if result.first_relevant_rank is not None else ''
+            if row['first_relevant_rank'] != rank or not math.isclose(
+                float(row['reciprocal_rank']), result.reciprocal_rank, rel_tol=1e-12, abs_tol=1e-12,
+            ):
+                raise ValueError(f'resume: {identifier}: место или метрика не совпадают с выдачей')
+            saved[identifier] = ReportEntry(row['started_at'], result)
+    return saved
+
+
 class CliArgs(argparse.Namespace):
     queries: Path
     output: Path | None
+    resume: Path | None
+    timeout_seconds: float
     limit: int | None
     top_k: int
     qdrant_url: str | None
@@ -178,6 +254,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--queries', type=Path, default=DEFAULT_QUERIES)
     parser.add_argument('--output', type=Path, help='новый csv-файл отчёта; существующий не перезаписывается')
+    parser.add_argument('--resume', type=Path, help='взять завершённые проверки из совместимого csv-отчёта')
+    parser.add_argument('--timeout', '--timeout-seconds', dest='timeout_seconds', type=float, default=300.0,
+                        help='ожидание ответа MWS в секундах, по умолчанию 300')
     parser.add_argument('--limit', type=int, help='сколько первых запросов проверить')
     parser.add_argument('--top-k', type=int, default=5)
     location = parser.add_mutually_exclusive_group()
@@ -191,6 +270,8 @@ def main() -> int:
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.top_k < 1 or (args.limit is not None and args.limit < 1):
         parser.error('top-k и limit должны быть положительными')
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        parser.error('timeout должен быть положительным конечным числом')
     try:
         cases = load_queries(args.queries)
         if args.limit is not None:
@@ -208,6 +289,8 @@ def main() -> int:
         output = args.output or ROOT / 'data' / 'evaluation' / f'results-{started:%Y%m%d-%H%M%S-%f}.csv'
         if output.exists():
             raise ValueError(f'отчёт уже существует: {output}; задайте новый --output')
+        if args.resume is not None and output.resolve() == args.resume.resolve():
+            raise ValueError('исходный отчёт resume и новый output должны отличаться')
         config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if config.path is not None and not config.path.is_dir():
             raise ValueError('локальное хранилище не найдено; задайте --qdrant-url')
@@ -218,32 +301,45 @@ def main() -> int:
             # весь набор проверяется до первого платного запроса
             validate_collection(store, name)
             validate_expected_articles(store, name, cases)
-            prepared = prepare_queries(cases, load_tokenizer(args.tokenizer_file), args.raw_query)
             point_count = store.count(name, exact=True).count
-            key = read_api_key()
-            embedding_config = EmbeddingConfig(key, url, deployment)
+            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k)
+            saved = load_report(args.resume, cases, context) if args.resume is not None else {}
+            pending = [case for case in cases if case.query_id not in saved]
+            prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file), args.raw_query) if pending else []
+            print(f'из отчёта: {len(saved)}; осталось запросов: {len(pending)}')
+            backend: EmbeddingsClient | None = None
+            embedding_config: EmbeddingConfig | None = None
+            if prepared:
+                embedding_config = EmbeddingConfig(read_api_key(), url, deployment, args.timeout_seconds)
             output.parent.mkdir(parents=True, exist_ok=True)
-            results: list[QueryEvaluation] = []
-            with output.open('x', encoding='utf-8', newline='') as report, closing(EmbeddingsClient(embedding_config)) as backend:
+            by_id: dict[str, QueryEvaluation] = {}
+            with ExitStack() as stack:
+                report = stack.enter_context(output.open('x', encoding='utf-8', newline=''))
+                if embedding_config is not None:
+                    backend = stack.enter_context(closing(EmbeddingsClient(embedding_config)))
                 writer = csv.writer(report)
                 writer.writerow(REPORT_COLUMNS)
                 print(f'коллекция: {name}; фрагментов в индексе: {point_count}')
                 print(f'отчёт: {output}')
-                for result in evaluate_queries(prepared, store, name, backend, args.top_k):
-                    rank = result.first_relevant_rank
-                    writer.writerow([
-                        started.isoformat(), name, point_count, fingerprint, args.raw_query, args.top_k,
-                        result.case.query_id, result.case.category, result.case.query,
-                        ';'.join(map(str, result.case.relevant_ids)), ';'.join(map(str, result.retrieved_ids)),
-                        rank if rank is not None else '', result.reciprocal_rank,
-                    ])
-                    report.flush()  # при ошибке уже завершённые проверки останутся в отчёте
-                    results.append(result)
-                    position = str(rank) if rank is not None else f'нет в первых {args.top_k}'
-                    print(f'{len(results)}/{len(cases)} {result.case.query_id}: место {position}')
+                # копируем готовые результаты в новый файл, сохраняя время исходной проверки
+                for case in cases:
+                    entry = saved.get(case.query_id)
+                    if entry is not None:
+                        writer.writerow(report_row(entry, context))
+                        by_id[case.query_id] = entry.result
+                report.flush()
+                if backend is not None:
+                    for result in evaluate_queries(prepared, store, name, backend, args.top_k):
+                        rank = result.first_relevant_rank
+                        writer.writerow(report_row(ReportEntry(started.isoformat(), result), context))
+                        report.flush()  # при ошибке уже завершённые проверки останутся в отчёте
+                        by_id[result.case.query_id] = result
+                        position = str(rank) if rank is not None else f'нет в первых {args.top_k}'
+                        print(f'{len(by_id)}/{len(cases)} {result.case.query_id}: место {position}')
             # при изменении индекса во время проверки сводка уже не сопоставима
             if store.count(name, exact=True).count != point_count:
                 raise ValueError('число фрагментов изменилось во время оценки; повторите на неизменном индексе')
+        results = [by_id[case.query_id] for case in cases]
         summary = summarize(results)
         print(f'завершено запросов: {summary.count}')
         print(f'Hit@{args.top_k}: {summary.hit_rate:.2%} ({summary.hits}/{summary.count})')

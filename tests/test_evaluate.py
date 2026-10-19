@@ -14,8 +14,9 @@ from qdrant_client import QdrantClient, models
 from chunking import ChunkingConfig
 from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError
 from evaluate import (
-    DEFAULT_QUERIES, QUERY_COLUMNS, EvaluationQuery, evaluate_queries, load_queries,
-    main, prepare_queries, query_set_hash, score_ranking, summarize, validate_expected_articles,
+    DEFAULT_QUERIES, QUERY_COLUMNS, REPORT_COLUMNS, EvaluationQuery, ReportContext, ReportEntry,
+    evaluate_queries, load_queries, load_report, main, prepare_queries, query_set_hash,
+    report_row, score_ranking, summarize, validate_expected_articles,
 )
 from index import VECTOR_SIZE, collection_name, ensure_collection
 from search import build_query
@@ -61,6 +62,50 @@ def add_point(store: QdrantClient, point_id: int, article_id: int, vector: list[
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_report_resume_rejects_different_settings_and_corrupt_results(self) -> None:
+        case = EvaluationQuery('one', 'exact', 'запрос', (1,))
+        context = ReportContext('test', 1, query_set_hash([case]), False, 5)
+        entry = ReportEntry('2026-10-19T09:00:00+00:00', score_ranking(case, [1], 5))
+        row = report_row(entry, context)
+        variants: list[tuple[str, str | int | float]] = [
+            ('collection', 'other'), ('collection_points', 2), ('top_k', 3),
+            ('query_set_sha256', 'other'), ('raw_query', 'True'), ('query_id', 'unknown'),
+            ('query', 'другой запрос'), ('category', 'typo'), ('relevant_article_ids', '2'),
+            ('first_relevant_rank', 2), ('reciprocal_rank', 0.5), ('reciprocal_rank', 'nan'),
+            ('retrieved_article_ids', '1;1'), ('retrieved_article_ids', 'abc'),
+            ('started_at', '2026-10-19T09:00:00'),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'report.csv'
+            for column, value in variants:
+                changed = row.copy()
+                changed[REPORT_COLUMNS.index(column)] = value
+                with source.open('w', encoding='utf-8', newline='') as output:
+                    writer = csv.writer(output)
+                    writer.writerow(REPORT_COLUMNS)
+                    writer.writerow(changed)
+                before = source.read_bytes()
+                with self.subTest(column=column, value=value), self.assertRaises(ValueError):
+                    load_report(source, [case], context)
+                self.assertEqual(before, source.read_bytes())
+
+    def test_report_resume_accepts_empty_header_and_valid_misses(self) -> None:
+        case = EvaluationQuery('one', 'exact', 'запрос', (1,))
+        context = ReportContext('test', 1, query_set_hash([case]), False, 5)
+        entry = ReportEntry('2026-10-19T09:00:00+00:00', score_ranking(case, [], 5))
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'report.csv'
+            with source.open('w', encoding='utf-8', newline='') as output:
+                csv.writer(output).writerow(REPORT_COLUMNS)
+            self.assertEqual(load_report(source, [case], context), {})
+            with source.open('a', encoding='utf-8', newline='') as output:
+                csv.writer(output).writerow(report_row(entry, context))
+            self.assertEqual(load_report(source, [case], context), {'one': entry})
+            with source.open('a', encoding='utf-8', newline='') as output:
+                csv.writer(output).writerow(report_row(entry, context))
+            with self.assertRaises(ValueError):
+                load_report(source, [case], context)
+
     def test_metrics_handle_misses_cutoff_and_multiple_relevant_articles(self) -> None:
         case = EvaluationQuery('one', 'exact', 'запрос', (10, 20))
         first = score_ranking(case, [20, 30, 10], 3)
@@ -146,6 +191,15 @@ class EvaluationTests(unittest.TestCase):
             self.assertIn('контрольных запросов: 18', stdout.getvalue())
             self.assertFalse(output.exists())
 
+    def test_invalid_timeout_is_rejected_before_loading_or_connecting(self) -> None:
+        for value in ['0', '-1', 'nan', 'inf']:
+            with (self.subTest(value=value), patch('sys.argv', ['evaluate.py', '--timeout', value]),
+                  patch('evaluate.load_queries', side_effect=AssertionError('csv не нужен')),
+                  patch('evaluate.connect_store', side_effect=AssertionError('qdrant не нужен')),
+                  redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error):
+                main()
+            self.assertEqual(error.exception.code, 2)
+
     def test_existing_report_is_preserved_before_api_access(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'results.csv'
@@ -226,6 +280,70 @@ class EvaluationTests(unittest.TestCase):
                     self.assertIn('MRR@5: 1.0000', stdout.getvalue())
                 else:
                     self.assertNotIn('MRR@5:', stdout.getvalue())
+
+    def test_cli_resumes_without_reembedding_completed_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'queries.csv'
+            storage = Path(folder) / 'qdrant'
+            first = Path(folder) / 'first.csv'
+            second = Path(folder) / 'second.csv'
+            third = Path(folder) / 'third.csv'
+            write_queries(source, [
+                ['one', 'exact', 'первый запрос', '1'],
+                ['two', 'paraphrase', 'второй запрос', '1'],
+            ])
+            name = collection_name(DEFAULT_URL, DEFAULT_MODEL, ChunkingConfig())
+            with closing(QdrantClient(path=str(storage))) as store:
+                ensure_collection(store, name)
+                store.upsert(name, points=[models.PointStruct(
+                    id=1, vector=[1.0] + [0.0] * (VECTOR_SIZE - 1), payload={
+                        'article_id': 1, 'title': 'тест', 'url': 'https://example.com/1', 'text': 'текст',
+                    },
+                )])
+            failed_backend = FakeEmbeddings(VECTOR_SIZE, 2)
+            resumed_backend = FakeEmbeddings(VECTOR_SIZE)
+            phases: list[tuple[Path, Path | None, FakeEmbeddings | None, int]] = [
+                (first, None, failed_backend, 1), (second, first, resumed_backend, 0),
+                (third, second, None, 0),
+            ]
+            contents: dict[Path, bytes] = {}
+            for output, resume, backend, expected_code in phases:
+                argv = ['evaluate.py', '--queries', str(source), '--output', str(output),
+                        '--qdrant-url', 'http://localhost:6333', '--timeout', '420']
+                if resume is not None:
+                    argv.extend(['--resume', str(resume)])
+                client = QdrantClient(path=str(storage))
+                with (patch('sys.argv', argv), patch.dict('os.environ', {}, clear=True),
+                      patch('evaluate.connect_store', return_value=client),
+                      patch('evaluate.load_tokenizer', return_value=CharacterTokenizer()) as tokenizer,
+                      patch('evaluate.read_api_key', return_value='test-key') as key,
+                      patch('evaluate.EmbeddingsClient', return_value=backend) as factory,
+                      redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr):
+                    if expected_code == 0:
+                        self.assertEqual(main(), 0)
+                        self.assertIn('MRR@5: 1.0000', stdout.getvalue())
+                    else:
+                        with self.assertRaises(SystemExit) as error:
+                            main()
+                        self.assertEqual(error.exception.code, expected_code)
+                        self.assertIn('two: синтетический сбой', stderr.getvalue())
+                    if backend is None:
+                        key.assert_not_called()
+                        factory.assert_not_called()
+                        tokenizer.assert_not_called()
+                    else:
+                        self.assertEqual(factory.call_args.args[0].timeout_seconds, 420.0)
+                for old, content in contents.items():
+                    self.assertEqual(old.read_bytes(), content)
+                contents[output] = output.read_bytes()
+            self.assertEqual(resumed_backend.calls, [[build_query('второй запрос')]])
+            with first.open(encoding='utf-8', newline='') as report:
+                original_row = next(csv.DictReader(report))
+            for output in [second, third]:
+                with output.open(encoding='utf-8', newline='') as report:
+                    rows = list(csv.DictReader(report))
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0], original_row)
 
 
 if __name__ == '__main__':
