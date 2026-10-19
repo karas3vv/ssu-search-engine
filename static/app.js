@@ -9,6 +9,28 @@ const section = /** @type {HTMLElement} */ (document.getElementById('results-sec
 const usedQuery = /** @type {HTMLElement} */ (document.getElementById('used-query'));
 let pending = false;
 
+// примеры меняются только в пустом неактивном поле и не запускают поиск
+const searchHints = [
+  'Как создавать отчёты Word из Excel?',
+  'Как сохранить страницу в PDF?',
+  'Почему больше ядер не всегда быстрее?',
+  'Как настроить домашнюю телефонию?',
+  'Как менять яркость монитора автоматически?',
+  'Как добавить cookie-баннер без плагина?',
+];
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+function changeSearchHint() {
+  const available = searchHints.filter(text => text !== query.placeholder);
+  query.placeholder = available[Math.floor(Math.random() * available.length)];
+}
+
+changeSearchHint();
+window.setInterval(() => {
+  if (query.value || document.activeElement === query || document.hidden || pending || reducedMotion.matches) return;
+  changeSearchHint();
+}, 6000);
+
 /** @param {string} text @param {string} [kind] */
 function status(text, kind = '') { message.textContent = text; message.className = `message ${kind}`; }
 
