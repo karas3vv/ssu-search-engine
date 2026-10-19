@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import logging
 import os
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import ExitStack, asynccontextmanager
@@ -27,6 +28,7 @@ from habr_search.retrieval.search import MAX_QUERY_TOKENS, build_query, search_a
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, SpellingDictionary, load_dictionary
 from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 from qdrant_client import QdrantClient
+from habr_search.index_version import index_revision
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -104,7 +106,12 @@ class SearchService:
         validate_collection(store, name)
         points = store.count(name, exact=True).count
         if dictionary is not None:
-            dictionary.validate_context(name, points)
+            try:
+                dictionary.validate_context(name, points, index_revision(store, name))
+            except ValueError:
+                # старый словарь отключает только подсказки, исходный поиск остаётся доступен
+                logging.warning('словарь устарел; подсказки отключены до пересборки')
+                dictionary = None
         self.store: QdrantClient = store
         self.name: str = name
         self.tokenizer: TextTokenizer = tokenizer
@@ -126,6 +133,12 @@ class SearchService:
     # проверяем фразу и возвращаем варианты из уже загруженного словаря
     def suggest(self, query: str) -> SuggestionResponse:
         build_query(query)
+        if self.dictionary is not None:
+            try:
+                self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
+                                                 index_revision(self.store, self.name))
+            except ValueError:
+                return SuggestionResponse(original_query=query, corrected_query=query, available=False, alternatives={})
         if self.dictionary is None:
             return SuggestionResponse(original_query=query, corrected_query=query, available=False, alternatives={})
         result = self.dictionary.suggest(query)
@@ -146,7 +159,8 @@ class SearchService:
             dictionary_available = self.dictionary is not None
             if self.dictionary is not None:
                 try:
-                    self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count)
+                    self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
+                                                     index_revision(self.store, self.name))
                 except ValueError:
                     # устаревший словарь не мешает искать исходную фразу, но не даёт подсказок
                     if request.correct_typos:

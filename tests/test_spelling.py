@@ -30,7 +30,7 @@ def dictionary(frequencies: dict[str, int] | None = None) -> SpellingDictionary:
         'автоматизация': 10, 'документов': 8, 'python': 10, 'docker': 7, 'елка': 3,
     }
     return SpellingDictionary(words, DictionaryInfo('test', 20, 10, dictionary_hash(words),
-                                                   '2026-10-19T00:00:00+00:00'))
+                                                   '2026-10-19T00:00:00+00:00', index_revision='unversioned'))
 
 
 # проверяем безопасные замены, неоднозначность и сохранение словаря

@@ -22,6 +22,7 @@ from habr_search.retrieval.spelling import (
     load_dictionary, save_dictionary, vocabulary_words,
 )
 from habr_search.vector_store import connect_store, resolve_qdrant_config
+from habr_search.index_version import index_revision
 
 
 def build_dictionary(store: QdrantClient, name: str, output: Path, batch_size: int = 256) -> DictionaryInfo:
@@ -33,6 +34,7 @@ def build_dictionary(store: QdrantClient, name: str, output: Path, batch_size: i
     if not store.collection_exists(name):
         raise ValueError(f'коллекция {name} не найдена')
     expected_points = store.count(name, exact=True).count
+    revision = index_revision(store, name)
     if expected_points == 0:
         raise ValueError('коллекция пуста; сначала выполните индексацию')
     article_words: dict[int, set[str]] = defaultdict(set)
@@ -59,12 +61,13 @@ def build_dictionary(store: QdrantClient, name: str, output: Path, batch_size: i
         if next_offset == offset or not records:
             raise ValueError('qdrant не продвинулся при чтении словаря')
         offset = next_offset
-    if len(seen) != expected_points or store.count(name, exact=True).count != expected_points:
-        raise ValueError('число фрагментов изменилось; не обновляйте индекс при построении словаря')
+    if (len(seen) != expected_points or store.count(name, exact=True).count != expected_points
+            or index_revision(store, name) != revision):
+        raise ValueError('индекс изменился; не обновляйте его при построении словаря')
     frequencies: Counter[str] = Counter()
     for words in article_words.values():
         frequencies.update(words)
-    return save_dictionary(output, frequencies, name, expected_points, len(article_words))
+    return save_dictionary(output, frequencies, name, expected_points, len(article_words), revision)
 
 
 def prepare_evaluation(dictionary: SpellingDictionary, source: Path, output: Path) -> int:

@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from habr_search.paths import DATA_DIR
+from habr_search.index_version import UNVERSIONED
 
 DEFAULT_DICTIONARY: Path = DATA_DIR / 'spelling.sqlite3'
-DICTIONARY_VERSION: str = '1'
+DICTIONARY_VERSION: str = '2'
 WORD_PATTERN: re.Pattern[str] = re.compile(r'[a-zA-Zа-яА-ЯёЁ]+')
 MAX_WORD_LENGTH: int = 40
 MAX_QUERY_CHARS: int = 4000
@@ -31,6 +32,7 @@ class DictionaryInfo:
     articles: int
     sha256: str
     created_at: str
+    index_revision: str | None = None  # отсутствие означает старый словарь без привязки к содержимому
 
 
 # вариант написания с числом правок, частотой и близостью триграмм
@@ -145,10 +147,11 @@ class SpellingDictionary:
             for gram in grams:
                 self.postings[gram].add(word)
 
-    # проверяем имя коллекции и число точек; изменения текста при том же числе не обнаруживаются
-    def validate_context(self, collection: str, points: int) -> None:
-        if self.info.collection != collection or self.info.points != points:
-            raise ValueError('словарь относится к другой коллекции или числу фрагментов; пересоберите его')
+    # одинаковое число фрагментов не скрывает замену текстов: сравниваем и версию содержимого
+    def validate_context(self, collection: str, points: int, revision: str = UNVERSIONED) -> None:
+        if (self.info.collection != collection or self.info.points != points
+                or self.info.index_revision is None or self.info.index_revision != revision):
+            raise ValueError('словарь не соответствует версии индекса; пересоберите его')
 
     # отбираем слова по триграммам, затем уточняем число правок и порядок вариантов
     def candidates(self, word: str, limit: int = 3) -> tuple[SpellingCandidate, ...]:
@@ -205,10 +208,12 @@ class SpellingDictionary:
 
 
 def save_dictionary(path: Path, frequencies: Mapping[str, int], collection: str,
-                    points: int, articles: int) -> DictionaryInfo:
+                    points: int, articles: int, revision: str = UNVERSIONED) -> DictionaryInfo:
     """записываем готовую sqlite-базу, не перезаписывая существующий файл."""
     info = DictionaryInfo(collection, points, articles, dictionary_hash(frequencies),
-                          datetime.now(timezone.utc).isoformat())
+                          datetime.now(timezone.utc).isoformat(), revision)
+    if not revision:
+        raise ValueError('нужна непустая версия индекса')
     SpellingDictionary(frequencies, info)
     if path.exists():
         raise ValueError(f'словарь уже существует: {path}; укажите другой --dictionary')
@@ -223,6 +228,7 @@ def save_dictionary(path: Path, frequencies: Mapping[str, int], collection: str,
             metadata = {
                 'version': DICTIONARY_VERSION, 'collection': collection, 'points': str(points),
                 'articles': str(articles), 'sha256': info.sha256, 'created_at': info.created_at,
+                'index_revision': revision,
             }
             connection.executemany('INSERT INTO metadata VALUES (?, ?)', metadata.items())
             connection.executemany('INSERT INTO words VALUES (?, ?)', sorted(frequencies.items()))
@@ -240,10 +246,14 @@ def load_dictionary(path: Path) -> SpellingDictionary:
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as connection:
             metadata = dict(connection.execute('SELECT key, value FROM metadata').fetchall())
-            if metadata.get('version') != DICTIONARY_VERSION:
+            if metadata.get('version') not in ('1', DICTIONARY_VERSION):
                 raise ValueError('неподдерживаемая версия словаря')
+            # старый файл читается для локальных проверок, но не считается актуальным для поиска
+            revision = str(metadata['index_revision']) if metadata['version'] == DICTIONARY_VERSION else None
+            if revision == '':
+                raise ValueError('в словаре отсутствует версия индекса')
             info = DictionaryInfo(str(metadata['collection']), int(metadata['points']), int(metadata['articles']),
-                                  str(metadata['sha256']), str(metadata['created_at']))
+                                  str(metadata['sha256']), str(metadata['created_at']), revision)
             frequencies = dict(connection.execute('SELECT word, article_frequency FROM words').fetchall())
         # sqlite возвращает динамические значения, поэтому проверяем типы до передачи алгоритму
         checked: dict[str, int] = {}

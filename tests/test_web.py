@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 from contextlib import closing
+from dataclasses import replace
 
 from fastapi.testclient import TestClient
 from qdrant_client import QdrantClient, models
@@ -11,6 +12,7 @@ from habr_search.ingestion.index import VECTOR_SIZE, ensure_collection
 from habr_search.retrieval.spelling import DictionaryInfo, SpellingDictionary, dictionary_hash
 from tests.test_evaluate import CharacterTokenizer, FakeEmbeddings
 from habr_search.web.app import SearchService, create_app
+from habr_search.index_version import invalidate_index
 
 
 # собираем сервис с временным индексом и подставным клиентом модели
@@ -23,7 +25,7 @@ def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
     }) for i in range(1, 4)])
     words = {'python': 3}
     dictionary = SpellingDictionary(words, DictionaryInfo('test', 3, 3, dictionary_hash(words),
-                                                          '2026-10-19T00:00:00+00:00'))
+                                                          '2026-10-19T00:00:00+00:00', index_revision='unversioned'))
     embeddings = FakeEmbeddings(VECTOR_SIZE)
     service = SearchService(store, 'test', CharacterTokenizer(), embeddings, dictionary)
     service.resources.callback(embeddings.close)
@@ -32,6 +34,34 @@ def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
 
 # проверяем страницу, форматы api, обработку ошибок и число вызовов модели
 class WebTests(unittest.TestCase):
+    # словарь старого формата отключает подсказки при запуске, но позволяет искать статьи
+    def test_legacy_dictionary_keeps_original_search_available(self) -> None:
+        with closing(QdrantClient(':memory:')) as store:
+            initial, embeddings = make_service(store)
+            assert initial.dictionary is not None
+            legacy = SpellingDictionary(initial.dictionary.frequencies,
+                                        replace(initial.dictionary.info, index_revision=None))
+            with self.assertLogs(level='WARNING'):
+                service = SearchService(store, 'test', CharacterTokenizer(), embeddings, legacy)
+            with TestClient(create_app(lambda: service)) as client:
+                self.assertFalse(client.get('/api/health').json()['spelling_available'])
+                result = client.post('/api/search', json={'query': 'pyhton'}).json()
+                self.assertEqual(result['used_query'], 'pyhton')
+                self.assertIsNone(result['suggested_query'])
+                self.assertEqual(len(embeddings.calls), 1)
+
+    # версия меняется даже при прежнем числе точек, и обе ручки перестают предлагать старые слова
+    def test_changed_revision_disables_suggestions_with_same_point_count(self) -> None:
+        with closing(QdrantClient(':memory:')) as store:
+            service, embeddings = make_service(store)
+            with TestClient(create_app(lambda: service)) as client:
+                invalidate_index(store, 'test')
+                self.assertFalse(client.post('/api/suggest', json={'query': 'pyhton'}).json()['available'])
+                result = client.post('/api/search', json={'query': 'pyhton'}).json()
+                self.assertIsNone(result['suggested_query'])
+                self.assertEqual(result['used_query'], 'pyhton')
+                self.assertEqual(len(embeddings.calls), 1)
+
     # страница, сведения о корпусе и подсказки работают без вызова модели
     def test_page_health_and_suggestions_do_not_call_model(self) -> None:
         with closing(QdrantClient(location=':memory:')) as store:
@@ -156,7 +186,7 @@ class WebTests(unittest.TestCase):
             words = {'стора': 3, 'спринга': 3}
             service.dictionary = SpellingDictionary(words, DictionaryInfo(
                 'test', 3, 3, dictionary_hash(words), '2026-10-19T00:00:00+00:00',
-            ))
+            index_revision='unversioned'))
             with TestClient(create_app(lambda: service)) as client:
                 result = client.post('/api/search', json={'query': 'Ктора без Спринга'}).json()
                 self.assertEqual(result['used_query'], 'Ктора без Спринга')
@@ -183,7 +213,7 @@ class WebTests(unittest.TestCase):
             words = {'серверы': 3, 'сервера': 3}
             service.dictionary = SpellingDictionary(words, DictionaryInfo(
                 'test', 3, 3, dictionary_hash(words), '2026-10-19T00:00:00+00:00',
-            ))
+            index_revision='unversioned'))
             with TestClient(create_app(lambda: service)) as client:
                 response = client.post('/api/search', json={'query': 'серверо', 'correct_typos': True}).json()
                 self.assertEqual(response['used_query'], 'серверо')

@@ -17,6 +17,7 @@ from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, 
 from habr_search.ingestion.index import VECTOR_SIZE, collection_name
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, load_dictionary
 from habr_search.vector_store import connect_store, resolve_qdrant_config
+from habr_search.index_version import index_revision
 
 QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages that answer the query.'
 MAX_QUERY_TOKENS: int = 1024
@@ -135,7 +136,7 @@ def main() -> int:
             validate_collection(store, name)
             if args.spelling_mode != 'off':
                 dictionary = load_dictionary(args.spelling_db)
-                dictionary.validate_context(name, store.count(name, exact=True).count)
+                dictionary.validate_context(name, store.count(name, exact=True).count, index_revision(store, name))
                 spelling = dictionary.suggest(args.query)
                 print(f'исходный запрос: {spelling.original}')
                 for suggestion in spelling.suggestions:

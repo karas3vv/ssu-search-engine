@@ -26,6 +26,7 @@ from habr_search.embeddings import (
 )
 from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
 from habr_search.vector_store import connect_store, resolve_qdrant_config
+from habr_search.index_version import invalidate_index
 
 VECTOR_SIZE: int = 3584  # размерность, которую вернул проверенный деплоймент parser
 
@@ -120,17 +121,18 @@ def index_chunks(
             for chunk, vector in zip(pending, vectors)
         ]
         # ждём подтверждения записи перед переходом к следующему пакету
+        invalidate_index(store, name)
         store.upsert(collection_name=name, points=points, wait=True)
         stats.saved += len(points)
     # если текст статьи изменился, убираем её старые точки только после успешной записи новых
-    store.delete(
-        collection_name=name,
-        points_selector=models.FilterSelector(filter=models.Filter(
-            must=[models.FieldCondition(key='article_id', match=models.MatchValue(value=article_id))],
-            must_not=[models.HasIdCondition(has_id=[chunk.id for chunk in chunks])],
-        )),
-        wait=True,
+    stale = models.Filter(
+        must=[models.FieldCondition(key='article_id', match=models.MatchValue(value=article_id))],
+        must_not=[models.HasIdCondition(has_id=[chunk.id for chunk in chunks])],
     )
+    # повтор без изменений не меняет версию и не заставляет пересобирать словарь
+    if store.count(name, exact=True, count_filter=stale).count:
+        invalidate_index(store, name)
+        store.delete(name, points_selector=models.FilterSelector(filter=stale), wait=True)
     return stats
 
 
