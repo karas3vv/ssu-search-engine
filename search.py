@@ -15,6 +15,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from chunking import DEFAULT_TOKENIZER, ChunkingConfig, load_tokenizer
 from embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
 from index import VECTOR_SIZE, collection_name
+from spelling import DEFAULT_DICTIONARY, load_dictionary
 from vector_store import connect_store, resolve_qdrant_config
 
 QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages that answer the query.'
@@ -97,6 +98,8 @@ class CliArgs(argparse.Namespace):
     overlap_tokens: int
     snippet_chars: int
     raw_query: bool
+    spelling_mode: str
+    spelling_db: Path
 
 
 # готовим запрос, получаем его вектор и печатаем найденные статьи
@@ -112,6 +115,9 @@ def main() -> int:
     parser.add_argument('--overlap-tokens', type=int, default=128, help='должно совпадать с настройкой индексатора')
     parser.add_argument('--snippet-chars', type=int, default=400, help='длина отрывка в выводе')
     parser.add_argument('--raw-query', action='store_true', help='для сервера, который сам добавляет инструкцию gemma')
+    parser.add_argument('--spelling-mode', choices=('off', 'suggest', 'apply'), default='off',
+                        help='off: исходный запрос; suggest: показать варианты; apply: применить однозначные исправления')
+    parser.add_argument('--spelling-db', type=Path, default=DEFAULT_DICTIONARY, help='словарь из spellcheck.py build')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.top_k < 1 or args.snippet_chars < 1:
         parser.error('top-k и snippet-chars должны быть положительными')
@@ -127,6 +133,17 @@ def main() -> int:
         with closing(connect_store(config)) as store:
             # проверяем индекс до запроса ключа и обращения в платный api
             validate_collection(store, name)
+            if args.spelling_mode != 'off':
+                dictionary = load_dictionary(args.spelling_db)
+                dictionary.validate_context(name, store.count(name, exact=True).count)
+                spelling = dictionary.suggest(args.query)
+                print(f'исходный запрос: {spelling.original}')
+                for suggestion in spelling.suggestions:
+                    options = ', '.join(item.word for item in suggestion.candidates)
+                    print(f'возможное исправление {suggestion.original}: {options}')
+                if args.spelling_mode == 'apply':
+                    query = build_query(spelling.corrected, args.raw_query)
+                    print(f'запрос для поиска: {spelling.corrected}')
             tokenizer = load_tokenizer(args.tokenizer_file)
             # длинный запрос отклоняем целиком, чтобы скрытое обрезание не меняло его смысл
             if tokenizer.count(query) > MAX_QUERY_TOKENS:
