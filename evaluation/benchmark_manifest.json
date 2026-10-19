@@ -1,0 +1,35 @@
+{
+  "scope_articles": 500,
+  "scope_sha256": "861d0736e4b26b60233bce51811a9f67751e217726732034c15679ac096fd7b0",
+  "dev_queries": 40,
+  "holdout_queries": 40,
+  "target_articles": 24,
+  "annotation_status": "seed_labels_need_review",
+  "retrieval_results_reviewed": false,
+  "negative_status": "synthetic_absent_names",
+  "negative_anchors": [
+    "QuokkaFS-Z19",
+    "KryptonCache-X73",
+    "NimbusDB-Q88",
+    "VectorBird-P41",
+    "LatticeShell-M62",
+    "OrchidCPU-R47",
+    "TundraMesh-V83",
+    "MarbleCodec-T96"
+  ],
+  "dev_categories": {
+    "exact": 12,
+    "paraphrase": 12,
+    "typo": 6,
+    "alias": 6,
+    "no_answer": 4
+  },
+  "holdout_categories": {
+    "exact": 12,
+    "paraphrase": 12,
+    "typo": 6,
+    "alias": 6,
+    "no_answer": 4
+  },
+  "notes": "не выполнять настройку по holdout; отрицательные примеры искусственные, отсутствие ответов в произвольном корпусе не гарантируется"
+}

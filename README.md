@@ -71,4 +71,5 @@ python -m pyright
 - [Интерфейс и API](docs/WEB.md)
 - [Архитектура и хранение данных](docs/ARCHITECTURE.md)
 - [Оценка качества поиска](docs/evaluation/README.md)
+- [Расширенная проверка и ручная разметка](docs/evaluation/BENCHMARK.md)
 - [Проверка опечаточника](docs/evaluation/SPELLING_BENCHMARK.md)

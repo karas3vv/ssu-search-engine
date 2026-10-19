@@ -1,0 +1,41 @@
+query_id,category,query,relevant_article_ids
+benchmark_holdout_drone_wings_exact,exact,Как TWCC согласует раскрытие складных крыльев и тягу дрона?,928436
+benchmark_holdout_drone_wings_paraphrase,paraphrase,Как квадрокоптеру резко тормозить с помощью мембран по образцу белки-летяги?,928436
+benchmark_holdout_drone_wings_typo,typo,Как беспилтник с крыльями летяги сохраняет управляемость при резком торможении?,928436
+benchmark_holdout_mongodb_checklist_exact,exact,Как перенести эксплуатационный чек-лист PostgreSQL на MongoDB?,948942
+benchmark_holdout_mongodb_checklist_paraphrase,paraphrase,"Какие проверки индексов, резервного копирования и мониторинга нужны при переходе с реляционной базы на документную?",948942
+benchmark_holdout_mongodb_checklist_alias,alias,Какие пункты из опыта с Постгресом пригодятся для эксплуатации Монги?,948942
+benchmark_holdout_music_key_exact,exact,Как построить ключевые знаки Фа-диез блюз-минора с помощью Inkscape?,964632
+benchmark_holdout_music_key_paraphrase,paraphrase,Как графически подобрать знаки при ключе для необычного шестиступенного лада?,964632
+benchmark_holdout_music_key_typo,typo,Как создать ключевые знаки для блюзового лада в Inksacpe?,964632
+benchmark_holdout_varypack_exact,exact,Как VaryPack дедуплицирует строки и формы объектов при бинарной сериализации?,966270
+benchmark_holdout_varypack_paraphrase,paraphrase,Какой двоичный формат сохраняет общие ссылки и описания полей без повторного кодирования одинаковых данных?,966270
+benchmark_holdout_varypack_alias,alias,Что даёт библиотека mol_vary по сравнению с обычной сериализацией JSON?,966270
+benchmark_holdout_lensdb_exact,exact,Как LensDB использует сырые байты и MemoryPack вместо JSON?,983464
+benchmark_holdout_lensdb_paraphrase,paraphrase,В каком экспериментальном аналоге Redis на Haskell пытаются снизить расходы на преобразование данных в текст?,983464
+benchmark_holdout_lensdb_typo,typo,Почему LensBD хранит байтовые последовательности вместо текстовых объектов?,983464
+benchmark_holdout_chat_bridge_exact,exact,Как на Perl AnyEvent связать комнату XMPP MUC с каналом IRC?,1011460
+benchmark_holdout_chat_bridge_paraphrase,paraphrase,Как пересылать сообщения между Jabber-конференцией и IRC в обе стороны без искажения кириллицы?,1011460
+benchmark_holdout_chat_bridge_alias,alias,Как сделать шлюз между джаббером и иркой с правильной обработкой UTF-8?,1011460
+benchmark_holdout_ttf_raycast_exact,exact,Как TTF-DOOM выполняет рейкастинг внутри TrueType hinting VM?,1020668
+benchmark_holdout_ttf_raycast_paraphrase,paraphrase,"Как передать положение игрока в шрифт через оси вариаций, чтобы сам шрифтовой движок вычислял стены?",1020668
+benchmark_holdout_ttf_raycast_typo,typo,Как запустить рейкастер внутри TrueTpye-шрифта вместо обычного графического движка?,1020668
+benchmark_holdout_windows_symbols_exact,exact,Как скачать oscdimg.exe с Microsoft Symbol Server без установки Windows ADK?,1042486
+benchmark_holdout_windows_symbols_paraphrase,paraphrase,"Как получить одну системную утилиту Windows, не скачивая многогигабайтный комплект разработки?",1042486
+benchmark_holdout_windows_symbols_alias,alias,Как через сервер символов Майкрософт получить нужный exe по временной метке и размеру образа?,1042486
+benchmark_holdout_nvme_adapter_exact,exact,Почему NVMe через адаптер miniPCI-E в ASUS K52F медленнее SATA SSD?,1050948
+benchmark_holdout_nvme_adapter_paraphrase,paraphrase,Почему установка быстрого накопителя вместо Wi-Fi карты в старом ноутбуке не даёт ожидаемого ускорения?,1050948
+benchmark_holdout_nvme_adapter_typo,typo,Какие ограничения у установки NVMe в слот mini PCIE старого ноутбкуа?,1050948
+benchmark_holdout_keyray_symbols_exact,exact,Как KeyRay заменяет текстовые триггеры на спецсимволы после нажатия пробела?,1051638
+benchmark_holdout_keyray_symbols_paraphrase,paraphrase,"Как вводить знак рубля без Alt-кодов, новой раскладки и конфликтующих горячих клавиш?",1051638
+benchmark_holdout_keyray_symbols_alias,alias,Как аналог Пунто Свитчера помогает вводить спецсимволы личными текстовыми сокращениями?,1051638
+benchmark_holdout_lua_gates_exact,exact,Как LogicGrid задаёт поведение логического вентиля через Lua update(inputs)?,1053312
+benchmark_holdout_lua_gates_paraphrase,paraphrase,Как собрать виртуальный восьмибитный процессор из программируемых вентилей в симуляторе схем?,1053312
+benchmark_holdout_lua_gates_typo,typo,Как программировать логические вентили на Lуа в симуляторе на C++ и SFML?,1053312
+benchmark_holdout_mining_llm_exact,exact,Как запускали локальную LLM на трёх p106-100 и одной p104-100?,1055222
+benchmark_holdout_mining_llm_paraphrase,paraphrase,"Почему добавление второй майнинговой видеокарты может замедлить модель, если её часть остаётся в оперативной памяти?",1055222
+benchmark_holdout_mining_llm_alias,alias,Почему для локальной нейросети на старых картах Паскаль автор выбрал Kobold и фиксировал частоты?,1055222
+benchmark_holdout_lattice,no_answer,Как создать расширение для командной оболочки LatticeShell-M62?,
+benchmark_holdout_orchid,no_answer,Как настроить аппаратную трассировку инструкций в OrchidCPU-R47?,
+benchmark_holdout_tundra,no_answer,Как восстановить ключи кластерного протокола TundraMesh-V83?,
+benchmark_holdout_marble,no_answer,Какие параметры сжатия поддерживает бинарный формат MarbleCodec-T96?,

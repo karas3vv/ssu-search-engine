@@ -1,0 +1,41 @@
+query_id,category,query,relevant_article_ids
+benchmark_dev_joomla_defaults_exact,exact,Как задать несколько значений default в XML-поле list в Joomla?,953058
+benchmark_dev_joomla_defaults_paraphrase,paraphrase,Как заранее отметить несколько пунктов списка в настройках только что установленного плагина?,953058
+benchmark_dev_joomla_defaults_typo,typo,Как в Joomal задать несколько значений по умолчанию для списка?,953058
+benchmark_dev_ktor_repositories_exact,exact,Как KRepo реализует suspend-репозитории для Ktor без Spring?,969730
+benchmark_dev_ktor_repositories_paraphrase,paraphrase,Как описывать запросы к базе интерфейсами с findBy и корутинами без тяжёлого DI-контейнера?,969730
+benchmark_dev_ktor_repositories_alias,alias,Какая библиотека даёт репозитории в стиле Spring Data для Ктора без Спринга?,969730
+benchmark_dev_home_voip_exact,exact,Как организовать связь между домами через FreePBX и SIP-телефоны?,974066
+benchmark_dev_home_voip_paraphrase,paraphrase,Как пожилым родственникам звонить между двумя домами на участке при отсутствии мобильного сигнала?,974066
+benchmark_dev_home_voip_typo,typo,Как настроить FreePBX и SIP-телфоны для связи между домами?,974066
+benchmark_dev_ydb_workbench_exact,exact,Как подключить YDB к AWS NoSQL Workbench через локальный прокси?,983678
+benchmark_dev_ydb_workbench_paraphrase,paraphrase,Как пользоваться графическим клиентом DynamoDB с базой Яндекса при несовместимой авторизации?,983678
+benchmark_dev_ydb_workbench_alias,alias,Как подключить Яндекс Датабейс к NoSQL Workbench через Document API?,983678
+benchmark_dev_wordpress_cookies_exact,exact,Как добавить предупреждение cookie в WordPress без плагина?,987650
+benchmark_dev_wordpress_cookies_paraphrase,paraphrase,Как показать посетителю уведомление и после нажатия кнопки запомнить согласие в localStorage без установки расширений?,987650
+benchmark_dev_wordpress_cookies_typo,typo,Как добавить уведомление о coockie в WordPres без плагина?,987650
+benchmark_dev_browser_pdf_exact,exact,Как сохранить веб-страницу в PDF одним длинным листом с выделяемым текстом и ссылками?,1003174
+benchmark_dev_browser_pdf_paraphrase,paraphrase,Как выгрузить только выбранный блок сайта в документ для чтения без рекламы и разрывов страниц?,1003174
+benchmark_dev_browser_pdf_alias,alias,Как браузерным расширением экспортировать страницу в пдф с кликабельными ссылками?,1003174
+benchmark_dev_amdahl_limit_exact,exact,Как закон Амдала ограничивает ускорение задачи при увеличении числа процессоров?,1054424
+benchmark_dev_amdahl_limit_paraphrase,paraphrase,Почему увеличение числа ядер не даёт линейного ускорения и что делать с последовательной частью программы?,1054424
+benchmark_dev_amdahl_limit_typo,typo,Как закон Амдла ограничивает ускорение при добавлении ядер?,1054424
+benchmark_dev_lumabloom_exact,exact,Как LumaBloom регулирует яркость мониторов по датчику KY-018 и ESP32?,1055900
+benchmark_dev_lumabloom_paraphrase,paraphrase,Как собрать настольный датчик света в форме цветка для автоматической подстройки нескольких экранов?,1055900
+benchmark_dev_lumabloom_alias,alias,Как DIY-цветок меняет автояркость внешних дисплеев через DDC/CI и встроенного через WMI?,1055900
+benchmark_dev_max_webhooks_exact,exact,Почему реальные вебхуки MAX API отличаются от Telegram Bot API?,1005282
+benchmark_dev_max_webhooks_paraphrase,paraphrase,"Как перестать ошибаться при разборе входящих сообщений бота, если документация не совпадает с реальными JSON-запросами?",1005282
+benchmark_dev_max_webhooks_typo,typo,Где находится текст сообщния в вебхуках MAX и как устроены inline-кнопки?,1005282
+benchmark_dev_nuitka_analysis_exact,exact,"Как DeNuitkanizator анализирует exe-файлы, собранные Nuitka?",1048908
+benchmark_dev_nuitka_analysis_paraphrase,paraphrase,"Как извлечь строки, пути и сведения о компиляторе из исполняемого файла Python без восстановления исходного кода?",1048908
+benchmark_dev_nuitka_analysis_alias,alias,"Как посмотреть метаданные экзешника, собранного Ньюткой из питона?",1048908
+benchmark_dev_p2p_sync_exact,exact,Какие ограничения есть у P2P-синхронизации WardLink по LAN без сервера?,1052502
+benchmark_dev_p2p_sync_paraphrase,paraphrase,"Почему два соседних устройства не могут синхронизироваться через локальную сеть, если подключены к разным роутерам?",1052502
+benchmark_dev_p2p_sync_typo,typo,Почему P2P-синхронизаця без сервера зависит от общей локальной сети?,1052502
+benchmark_dev_cloud_functions_exact,exact,Как развернуть Google Cloud Function с HTTP endpoint через GitHub Actions?,1053330
+benchmark_dev_cloud_functions_paraphrase,paraphrase,Как сделать небольшой серверный обработчик отправки писем с формы без аренды и обслуживания виртуального сервера?,1053330
+benchmark_dev_cloud_functions_alias,alias,Как задеплоить бессерверный бэкенд в GCP с помощью CI на Гитхабе?,1053330
+benchmark_dev_quokka,no_answer,Как настроить журналирование в файловой системе QuokkaFS-Z19?,
+benchmark_dev_krypton,no_answer,Какой формат команд использует сервер KryptonCache-X73?,
+benchmark_dev_nimbus,no_answer,Как включить многоверсионные транзакции в NimbusDB-Q88?,
+benchmark_dev_vectorbird,no_answer,Как перенести очереди заданий между узлами VectorBird-P41?,
