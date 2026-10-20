@@ -37,11 +37,15 @@ python -m pip install -r requirements.txt
 
 ## Запуск
 
+Для подготовленного индекса и словаря:
+
 ```bash
-docker compose up -d qdrant
+./run.sh
 ```
 
-Если запускаете проект впервые, поместите корпус статей в `data/corpus.sqlite3` и [создайте индекс](docs/evaluation/EXPANDED.md). Корпус, индекс и словарь опечаток не входят в Git.
+Скрипт запускает Qdrant, ждёт ответа базы и запускает страницу поиска с `data/spelling-full.sqlite3`. Если в проекте есть `.venv`, используется Python из неё; иначе — `python3`. Дополнительные параметры передаются приложению, например `./run.sh --port 8001`. Для остановки страницы нажмите `Ctrl+C`; Qdrant продолжит работать в фоне.
+
+При первом запуске сначала поднимите Qdrant командой `docker compose up -d qdrant`, поместите корпус статей в `data/corpus.sqlite3` и [создайте индекс](docs/evaluation/EXPANDED.md). Корпус, индекс и словарь опечаток не входят в Git.
 
 После индексации [постройте словарь опечаток](docs/evaluation/SPELLING.md):
 
@@ -52,7 +56,10 @@ python -m habr_search.retrieval.spellcheck build --qdrant-url http://127.0.0.1:6
 
 Если актуальный словарь уже существует, пропустите его построение. После изменения индекса создайте словарь в новый файл и укажите его путь при запуске.
 
+После подготовки данных используйте `./run.sh`. Для запуска вручную:
+
 ```bash
+docker compose up -d qdrant
 python -m habr_search.web.app --qdrant-url http://127.0.0.1:6333 \
   --spelling-db data/spelling-full.sqlite3
 ```
