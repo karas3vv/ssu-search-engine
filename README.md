@@ -41,13 +41,25 @@ python -m pip install -r requirements.txt
 docker compose up -d qdrant
 ```
 
-Если запускаете проект впервые, поместите корпус статей в `data/corpus.sqlite3`, [создайте индекс](docs/evaluation/EXPANDED.md) и [словарь опечаток](docs/evaluation/SPELLING.md). Корпус, индекс и словарь не входят в Git.
+Если запускаете проект впервые, поместите корпус статей в `data/corpus.sqlite3` и [создайте индекс](docs/evaluation/EXPANDED.md). Корпус, индекс и словарь опечаток не входят в Git.
+
+После индексации [постройте словарь опечаток](docs/evaluation/SPELLING.md):
 
 ```bash
-python -m habr_search.web.app --qdrant-url http://127.0.0.1:6333
+python -m habr_search.retrieval.spellcheck build --qdrant-url http://127.0.0.1:6333 \
+  --dictionary data/spelling-full.sqlite3
+```
+
+Если актуальный словарь уже существует, пропустите его построение. После изменения индекса создайте словарь в новый файл и укажите его путь при запуске.
+
+```bash
+python -m habr_search.web.app --qdrant-url http://127.0.0.1:6333 \
+  --spelling-db data/spelling-full.sqlite3
 ```
 
 Откройте [localhost:8000](http://127.0.0.1:8000). Ключ MWS вводится в терминале или берётся из `MWS_API_KEY`. Поиск и первичная индексация обращаются к платному API MWS.
+
+Интерфейс показывает по пять статей. Кнопка «Показать ещё» раскрывает следующие результаты, всего до 20 на запрос, без дополнительных обращений к MWS.
 
 Поиск из терминала:
 
