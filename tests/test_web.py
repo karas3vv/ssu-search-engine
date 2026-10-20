@@ -34,6 +34,25 @@ def make_service(store: QdrantClient) -> tuple[SearchService, FakeEmbeddings]:
 
 # проверяем страницу, форматы api, обработку ошибок и число вызовов модели
 class WebTests(unittest.TestCase):
+    # двадцать кандидатов для кнопки получаем одним вызовом модели и группируем по статьям
+    def test_twenty_candidates_use_one_embedding_and_keep_articles_unique(self) -> None:
+        with closing(QdrantClient(':memory:')) as store:
+            service, embeddings = make_service(store)
+            vector = [1.0] + [0.0] * (VECTOR_SIZE - 1)
+            store.upsert('test', [models.PointStruct(id=i, vector=vector, payload={
+                'article_id': i if i < 26 else 1, 'title': f'статья {i}',
+                'url': f'https://habr.com/ru/articles/{i}/', 'text': 'текст',
+            }) for i in range(4, 27)])
+            before = store.count('test', exact=True).count
+            with TestClient(create_app(lambda: service)) as client:
+                response = client.post('/api/search', json={'query': 'python', 'top_k': 20})
+                self.assertEqual(response.status_code, 200)
+                items = response.json()['results']
+                self.assertEqual(len(items), 20)
+                self.assertEqual(len({item['article_id'] for item in items}), 20)
+                self.assertEqual(len(embeddings.calls), 1)
+                self.assertEqual(store.count('test', exact=True).count, before)
+
     # порог сервера разрешает пустую выдачу без повторного обращения к модели
     def test_server_threshold_returns_empty_results_with_one_embedding_call(self) -> None:
         with closing(QdrantClient(':memory:')) as store:

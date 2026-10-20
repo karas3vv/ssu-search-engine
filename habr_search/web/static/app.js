@@ -6,6 +6,14 @@ const message = /** @type {HTMLElement} */ (document.getElementById('message'));
 const suggestion = /** @type {HTMLElement} */ (document.getElementById('suggestion'));
 const results = /** @type {HTMLOListElement} */ (document.getElementById('results'));
 const section = /** @type {HTMLElement} */ (document.getElementById('results-section'));
+const showMore = /** @type {HTMLButtonElement} */ (document.getElementById('show-more'));
+const PAGE_SIZE = 5;
+const RESULT_LIMIT = 20;
+/** @typedef {{article_id:number,title:string,url:string,snippet:string,score:number}} Article */
+/** @type {Article[]} */
+let foundArticles = [];
+let shownCount = 0;
+let activeQuery = '';
 let pending = false;
 
 // примеры меняются только в пустом неактивном поле и не запускают поиск
@@ -68,7 +76,7 @@ async function api(path, body) {
 }
 
 // текст статьи вставляется как текст, а не как разметка из внешнего источника
-/** @param {{article_id:number,title:string,url:string,snippet:string,score:number}} item */
+/** @param {Article} item @returns {HTMLLIElement} */
 function article(item) {
   const card = document.createElement('li'); card.className = 'result';
   const heading = document.createElement('h3');
@@ -84,7 +92,30 @@ function article(item) {
   card.append(heading, snippet); return card;
 }
 
-query.addEventListener('input', () => { suggestion.hidden = true; });
+// при изменении поля не продолжаем выдачу другой поисковой фразы
+function updateShowMore() {
+  showMore.hidden = pending || query.value.trim() !== activeQuery || shownCount >= foundArticles.length;
+}
+
+// добавляем следующую пятёрку из готового ответа; повторного запроса к api здесь нет
+/** @returns {HTMLLIElement | null} */
+function appendResults() {
+  const cards = foundArticles.slice(shownCount, shownCount + PAGE_SIZE).map(article);
+  results.append(...cards);
+  shownCount += cards.length;
+  updateShowMore();
+  return cards[0] || null;
+}
+
+showMore.addEventListener('click', () => {
+  if (pending || query.value.trim() !== activeQuery) return;
+  const firstNew = appendResults();
+  // переносим фокус к новой статье, в том числе когда последняя кнопка уже скрылась
+  firstNew?.querySelector('a')?.focus({preventScroll: true});
+  firstNew?.scrollIntoView({behavior: reducedMotion.matches ? 'auto' : 'smooth', block: 'start'});
+});
+
+query.addEventListener('input', () => { suggestion.hidden = true; updateShowMore(); });
 document.querySelectorAll('[data-query]').forEach(button => button.addEventListener('click', () => {
   query.value = button.getAttribute('data-query') || ''; query.dispatchEvent(new Event('input')); query.focus();
 }));
@@ -114,16 +145,23 @@ async function runSearch(text) {
   if (pending) return;
   if (!text.trim()) { query.focus(); return; }
   pending = true; searchButton.disabled = true; results.setAttribute('aria-busy', 'true');
+  foundArticles = []; shownCount = 0; activeQuery = '';
+  updateShowMore();
   section.hidden = true; suggestion.hidden = true;
   status('Ищем статьи…', 'loading');
   try {
-    const value = await api('/api/search', {query: text, top_k: 5, correct_typos: false});
-    results.replaceChildren(...value.results.map(article)); section.hidden = false;
+    // один вектор запроса используется для двадцати кандидатов; сначала показываем только пять
+    const value = await api('/api/search', {query: text, top_k: RESULT_LIMIT, correct_typos: false});
+    foundArticles = value.results; activeQuery = text.trim();
+    results.replaceChildren(); appendResults(); section.hidden = false;
     showSuggestion(text, value.suggested_query || null);
     status(value.results.length ? '' : 'Подходящих статей не найдено. Попробуйте уточнить запрос.');
   } catch (error) {
     status(error instanceof Error ? error.message : 'Не удалось выполнить поиск. Проверьте соединение и повторите запрос.', 'error');
-  } finally { pending = false; searchButton.disabled = false; results.removeAttribute('aria-busy'); }
+  } finally {
+    pending = false; searchButton.disabled = false; results.removeAttribute('aria-busy');
+    updateShowMore();
+  }
 }
 
 form?.addEventListener('submit', event => {

@@ -257,6 +257,21 @@ input::placeholder{
   color:#65777b;
   margin:0
 }
+/* кнопка раскрывает следующие статьи текущего поиска */
+.show-more{
+  display:block;
+  margin:24px auto 0;
+  padding:12px 24px;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:#fff;
+  color:var(--accent);
+  font-weight:600
+}
+.show-more:hover{
+  border-color:var(--accent);
+  background:#f0f8f5
+}
 .sr-only{
   position:absolute;
   width:1px;
