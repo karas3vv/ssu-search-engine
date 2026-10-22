@@ -1,5 +1,5 @@
 """собираем статьи хабра с возможностью продолжить после остановки."""
-# вход: ленты хабра; выход: база статей, очередь обхода и выгрузка в папке data
+# вход: ленты хабра; выход: база статей и очередь обхода в папке data
 from __future__ import annotations
 
 import argparse
@@ -132,7 +132,7 @@ def parse_article(html: str, url: str) -> tuple[ArticleDocument, list[str]]:
     match = ARTICLE.fullmatch(urlsplit(url).path)
     if match is None:
         raise ValueError('unexpected article URL')
-    # собираем данные для записи в базу и jsonl
+    # собираем данные для записи в базу
     document: ArticleDocument = {
         'id': int(match[1]),
         'url': url,
@@ -273,7 +273,8 @@ def main() -> int:
     parser.add_argument('--delay', type=float, default=10)
     parser.add_argument('--feed', action='append', help='Habr article feed URL; repeatable')
     parser.add_argument('--save-html', action='store_true', help='also save gzip-compressed article HTML')
-    parser.add_argument('--export-only', action='store_true')
+    parser.add_argument('--export-only', action='store_true',
+                        help='выгрузить сохранённые статьи в jsonl без сбора новых')
     parser.add_argument('--retry-redirects', action='store_true',
                         help='вернуть в очередь статьи, пропущенные из-за старой ошибки перенаправления')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
@@ -291,10 +292,12 @@ def main() -> int:
     CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL,
         kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT);
     ''')
-    output = args.data_dir / 'articles.jsonl'
-    export(db, output)  # восстанавливаем jsonl после возможного прерывания
     if args.export_only:
-        db.close()
+        # выгрузка создаётся только по явной команде и не нужна для продолжения сбора
+        try:
+            export(db, args.data_dir / 'articles.jsonl')
+        finally:
+            db.close()
         return 0
 
     if args.retry_redirects:
@@ -319,75 +322,71 @@ def main() -> int:
     try:
         if total < args.limit:
             fetcher.load_robots()
-        with output.open('a', encoding='utf-8') as stream:
-            # собираем статьи до общего лимита с учётом уже сохранённых
-            while total < args.limit:
-                # сначала обрабатываем статьи, затем страницы лент
-                task = cast(TaskRow | None, db.execute("SELECT seq,url,kind FROM queue WHERE state='pending' ORDER BY CASE kind WHEN 'article' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone())
-                if not task:
-                    logging.warning('Queue exhausted at %s articles (target %s)', total, args.limit)
-                    break
-                seq, url, kind = task
-                try:
-                    page_data = fetcher.get(url)
-                    html = page_data.html
-                    if kind == 'listing':
-                        # добавляем статьи из ленты и следующую страницу
-                        links, soup = article_links(html)
-                        if not links:
-                            raise ValueError('no article links; check listing layout')
-                        for link in links:
-                            enqueue(link, 'article')
-                        current = re.search(r'/page(\d+)/$', page_data.url)
-                        page = int(current[1]) if current else 1
-                        root = re.sub(r'page\d+/$', '', page_data.url)
-                        next_url = root + f'page{page + 1}/'
-                        if any(urljoin(BASE, string_attr(a, 'href')) == next_url for a in soup.select('a[href]')):
-                            enqueue(next_url, 'listing')
-                        logging.info('Listing: %s (%s links)', url, len(links))
-                    else:
-                        # разбираем статью и проверяем, не сохранена ли она
-                        doc, hubs = parse_article(html, page_data.url)
-                        if not db.execute('SELECT 1 FROM articles WHERE id=?', (doc['id'],)).fetchone():
-                            # при необходимости сохраняем сжатый исходный html
-                            if args.save_html:
-                                folder = args.data_dir / 'html'
-                                folder.mkdir(exist_ok=True)
-                                with gzip.open(folder / f"{doc['id']}.html.gz", 'wt', encoding='utf-8') as raw:
-                                    raw.write(html)
-                            # записываем документ в sqlite и добавляем строку в jsonl
-                            payload = json.dumps(doc, ensure_ascii=False)
-                            db.execute('INSERT INTO articles VALUES (?,?)', (doc['id'], payload))
-                            db.commit()
-                            stream.write(payload + '\n')
-                            stream.flush()
-                            total += 1
-                            logging.info('Saved %s/%s: %s', total, args.limit, doc['title'])
-                        # расширяем обход лентами найденных хабов
-                        for hub in hubs:
-                            enqueue(hub, 'listing')
-                    # помечаем успешно обработанную ссылку
-                    db.execute("UPDATE queue SET state='done',error=NULL WHERE seq=?", (seq,))
-                    db.commit()
-                except PermissionError:
+        # собираем статьи до общего лимита с учётом уже сохранённых
+        while total < args.limit:
+            # сначала обрабатываем статьи, затем страницы лент
+            task = cast(TaskRow | None, db.execute("SELECT seq,url,kind FROM queue WHERE state='pending' ORDER BY CASE kind WHEN 'article' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone())
+            if not task:
+                logging.warning('Queue exhausted at %s articles (target %s)', total, args.limit)
+                break
+            seq, url, kind = task
+            try:
+                page_data = fetcher.get(url)
+                html = page_data.html
+                if kind == 'listing':
+                    # добавляем статьи из ленты и следующую страницу
+                    links, soup = article_links(html)
+                    if not links:
+                        raise ValueError('no article links; check listing layout')
+                    for link in links:
+                        enqueue(link, 'article')
+                    current = re.search(r'/page(\d+)/$', page_data.url)
+                    page = int(current[1]) if current else 1
+                    root = re.sub(r'page\d+/$', '', page_data.url)
+                    next_url = root + f'page{page + 1}/'
+                    if any(urljoin(BASE, string_attr(a, 'href')) == next_url for a in soup.select('a[href]')):
+                        enqueue(next_url, 'listing')
+                    logging.info('Listing: %s (%s links)', url, len(links))
+                else:
+                    # разбираем статью и проверяем, не сохранена ли она
+                    doc, hubs = parse_article(html, page_data.url)
+                    if not db.execute('SELECT 1 FROM articles WHERE id=?', (doc['id'],)).fetchone():
+                        # при необходимости сохраняем сжатый исходный html
+                        if args.save_html:
+                            folder = args.data_dir / 'html'
+                            folder.mkdir(exist_ok=True)
+                            with gzip.open(folder / f"{doc['id']}.html.gz", 'wt', encoding='utf-8') as raw:
+                                raw.write(html)
+                        # сохраняем статью и подтверждаем запись перед обработкой следующей ссылки
+                        payload = json.dumps(doc, ensure_ascii=False)
+                        db.execute('INSERT INTO articles VALUES (?,?)', (doc['id'], payload))
+                        db.commit()
+                        total += 1
+                        logging.info('Saved %s/%s: %s', total, args.limit, doc['title'])
+                    # расширяем обход лентами найденных хабов
+                    for hub in hubs:
+                        enqueue(hub, 'listing')
+                # помечаем успешно обработанную ссылку
+                db.execute("UPDATE queue SET state='done',error=NULL WHERE seq=?", (seq,))
+                db.commit()
+            except PermissionError:
+                raise
+            except (requests.RequestException, ValueError) as exc:
+                # при сбое сети оставляем задачу для следующего запуска
+                if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
                     raise
-                except (requests.RequestException, ValueError) as exc:
-                    # при сбое сети оставляем задачу для следующего запуска
-                    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-                        raise
-                    db.execute("UPDATE queue SET state='failed',error=? WHERE seq=?", (str(exc), seq))
-                    db.commit()
-                    logging.warning('%s: %s', url, exc)
+                db.execute("UPDATE queue SET state='failed',error=? WHERE seq=?", (str(exc), seq))
+                db.commit()
+                logging.warning('%s: %s', url, exc)
     except KeyboardInterrupt:
         logging.info('Stopped; run the same command to resume')
     except (PermissionError, requests.RequestException) as exc:
         logging.error('Stopped; task remains pending: %s', exc)
         return 1
     finally:
-        # обновляем выгрузку и закрываем базу даже при остановке
-        export(db, output)
+        # закрываем базу даже при остановке; прогресс уже сохранён в sqlite
         db.close()
-    logging.info('Corpus: %s articles, %s', total, output)
+    logging.info('Corpus: %s articles, %s', total, args.data_dir / 'corpus.sqlite3')
     return 0 if total >= args.limit else 2
 
 

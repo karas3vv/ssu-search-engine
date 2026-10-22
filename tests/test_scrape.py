@@ -1,10 +1,13 @@
 """проверяем ссылки, перенаправления и восстановление очереди без запросов к хабру."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import unittest
 from io import BytesIO
 from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.robotparser import RobotFileParser
 
@@ -12,7 +15,7 @@ import requests
 from urllib3.response import HTTPResponse
 
 from habr_search.ingestion.scrape import (
-    BASE, MAX_REDIRECTS, Fetcher, article_links, parse_article, retry_redirect_tasks,
+    BASE, MAX_REDIRECTS, Fetcher, FetchedPage, article_links, main, parse_article, retry_redirect_tasks,
 )
 
 
@@ -28,8 +31,88 @@ def response(status: int, location: str | None = None, html: str = '') -> reques
     return result
 
 
+# готовим временный корпус и задачи, чтобы не обращаться к настоящим статьям
+def create_corpus(data: Path, article_ids: tuple[int, ...] = ()) -> None:
+    with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+        db.executescript('''
+            CREATE TABLE articles(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE queue(seq INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL,
+                kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT);
+        ''')
+        db.executemany("INSERT INTO queue(url, kind) VALUES (?, 'article')",
+                       [(BASE + f'/ru/articles/{article_id}/',) for article_id in article_ids])
+        db.commit()
+
+
 # проверяем полный переход от ссылки компании до сохранённого документа
 class ScrapeTests(unittest.TestCase):
+    # после остановки продолжаем по sqlite, не создавая jsonl ни в одном из запусков
+    def test_crawl_resumes_after_interruption_without_jsonl(self) -> None:
+        html = '<article><h1>пример</h1><div class="article-formatted-body">полный текст</div></article>'
+        with TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            create_corpus(data, (1, 2))
+            arguments = ['scrape', '--data-dir', str(data), '--limit', '2']
+            with (patch('sys.argv', arguments), patch('habr_search.ingestion.scrape.Fetcher') as factory,
+                  patch('habr_search.ingestion.scrape.logging.basicConfig'),
+                  patch('habr_search.ingestion.scrape.logging.FileHandler')):
+                factory.return_value.get.side_effect = [FetchedPage(html, BASE + '/ru/articles/1/'), KeyboardInterrupt()]
+                self.assertEqual(main(), 2)
+                self.assertFalse((data / 'articles.jsonl').exists())
+                with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+                    self.assertEqual(db.execute('SELECT id FROM articles').fetchall(), [(1,)])
+                    self.assertEqual(db.execute("SELECT state FROM queue WHERE kind='article' ORDER BY seq").fetchall(),
+                                     [('done',), ('pending',)])
+                factory.return_value.get.side_effect = None
+                factory.return_value.get.return_value = FetchedPage(html, BASE + '/ru/articles/2/')
+                self.assertEqual(main(), 0)
+            self.assertFalse((data / 'articles.jsonl').exists())
+            with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT id FROM articles ORDER BY id').fetchall(), [(1,), (2,)])
+                self.assertEqual(db.execute("SELECT state FROM queue WHERE kind='article' ORDER BY seq").fetchall(),
+                                 [('done',), ('done',)])
+
+    # обычный сбор не перезаписывает ранее сделанную пользовательскую выгрузку
+    def test_crawl_leaves_existing_jsonl_unchanged(self) -> None:
+        html = '<article><h1>пример</h1><div class="article-formatted-body">полный текст</div></article>'
+        with TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            create_corpus(data, (1,))
+            output = data / 'articles.jsonl'
+            output.write_text('сохранённая выгрузка\n', encoding='utf-8')
+            with (patch('sys.argv', ['scrape', '--data-dir', str(data), '--limit', '1']),
+                  patch('habr_search.ingestion.scrape.Fetcher') as factory,
+                  patch('habr_search.ingestion.scrape.logging.basicConfig'),
+                  patch('habr_search.ingestion.scrape.logging.FileHandler')):
+                factory.return_value.get.return_value = FetchedPage(html, BASE + '/ru/articles/1/')
+                self.assertEqual(main(), 0)
+            self.assertEqual(output.read_text(encoding='utf-8'), 'сохранённая выгрузка\n')
+            with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM articles').fetchone(), (1,))
+
+    # явный экспорт восстанавливает выгрузку по порядку id без загрузки страниц
+    def test_export_only_creates_jsonl_without_fetching(self) -> None:
+        with TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            create_corpus(data)
+            documents = [{'id': 2, 'text': 'второй'}, {'id': 1, 'text': 'первый'}]
+            with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+                db.executemany('INSERT INTO articles VALUES (?, ?)',
+                               [(item['id'], json.dumps(item, ensure_ascii=False)) for item in documents])
+                db.commit()
+            output = data / 'articles.jsonl'
+            output.write_text('старая выгрузка\n', encoding='utf-8')
+            with (patch('sys.argv', ['scrape', '--data-dir', str(data), '--export-only']),
+                  patch('habr_search.ingestion.scrape.Fetcher', side_effect=AssertionError('сеть не нужна')),
+                  patch('habr_search.ingestion.scrape.logging.basicConfig'),
+                  patch('habr_search.ingestion.scrape.logging.FileHandler')):
+                self.assertEqual(main(), 0)
+            exported = [json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(exported, list(reversed(documents)))
+            self.assertFalse((data / 'articles.tmp').exists())
+            with closing(sqlite3.connect(data / 'corpus.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM articles').fetchone(), (2,))
+
     # пути компаний сохраняются, ссылки на чужие сайты отбрасываются, id не дублируются
     def test_listing_keeps_company_urls_and_rejects_foreign_links(self) -> None:
         html = ''.join(f'<a class="tm-title__link" href="{url}">статья</a>' for url in (
