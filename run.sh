@@ -10,6 +10,15 @@ else
     python_bin=python3
 fi
 
+# локальный режим запускаем без docker, ключа и проверки qdrant
+previous_argument=''
+for argument in "$@"; do
+    if [[ "$argument" == "--engine=tantivy" || ( "$previous_argument" == "--engine" && "$argument" == "tantivy" ) ]]; then
+        exec "$python_bin" -m habr_search.web.app "$@"
+    fi
+    previous_argument="$argument"
+done
+
 docker compose up -d qdrant
 
 # ждём ответа базы, чтобы первый запуск не опередил загрузку qdrant

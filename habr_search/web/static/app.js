@@ -15,6 +15,7 @@ let foundArticles = [];
 let shownCount = 0;
 let activeQuery = '';
 let pending = false;
+let searchGeneration = 0;
 
 // примеры меняются только в пустом неактивном поле и не запускают поиск
 const searchHints = [
@@ -115,7 +116,7 @@ showMore.addEventListener('click', () => {
   firstNew?.scrollIntoView({behavior: reducedMotion.matches ? 'auto' : 'smooth', block: 'start'});
 });
 
-query.addEventListener('input', () => { suggestion.hidden = true; updateShowMore(); });
+query.addEventListener('input', () => { ++searchGeneration; suggestion.hidden = true; updateShowMore(); });
 document.querySelectorAll('[data-query]').forEach(button => button.addEventListener('click', () => {
   query.value = button.getAttribute('data-query') || ''; query.dispatchEvent(new Event('input')); query.focus();
 }));
@@ -139,22 +140,34 @@ function showSuggestion(originalQuery, suggestedQuery) {
   suggestion.append(button);
 }
 
-// каждый поиск использует введённый текст и делает ровно один запрос к модели
+// подсказка приходит после результатов и не может заменить подсказку нового запроса
+/** @param {string} text @param {number} generation */
+async function deferredSuggestion(text, generation) {
+  try {
+    const value = await api('/api/suggest', {query: text});
+    if (generation !== searchGeneration || query.value.trim() !== text.trim()) return;
+    showSuggestion(text, value.available && value.corrected_query !== text.trim() ? value.corrected_query : null);
+  } catch { /* выдача остаётся доступна даже при сбое подсказок */ }
+}
+
+// каждый поиск использует введённый текст; исправление требует отдельного нажатия
 /** @param {string} text */
 async function runSearch(text) {
   if (pending) return;
   if (!text.trim()) { query.focus(); return; }
+  const generation = ++searchGeneration;
   pending = true; searchButton.disabled = true; results.setAttribute('aria-busy', 'true');
   foundArticles = []; shownCount = 0; activeQuery = '';
   updateShowMore();
   section.hidden = true; suggestion.hidden = true;
   status('Ищем статьи…', 'loading');
   try {
-    // один вектор запроса используется для двадцати кандидатов; сначала показываем только пять
+    // сервер возвращает до двадцати кандидатов, сначала показываем только пять
     const value = await api('/api/search', {query: text, top_k: RESULT_LIMIT, correct_typos: false});
     foundArticles = value.results; activeQuery = text.trim();
     results.replaceChildren(); appendResults(); section.hidden = false;
     showSuggestion(text, value.suggested_query || null);
+    if (value.deferred_suggestion) void deferredSuggestion(text, generation);
     status(value.results.length ? '' : 'Подходящих статей не найдено. Попробуйте уточнить запрос.');
   } catch (error) {
     status(error instanceof Error ? error.message : 'Не удалось выполнить поиск. Проверьте соединение и повторите запрос.', 'error');

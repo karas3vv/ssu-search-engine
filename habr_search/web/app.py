@@ -31,6 +31,7 @@ from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, 
 from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 from qdrant_client import QdrantClient
 from habr_search.index_version import index_revision
+from habr_search.paths import DATA_DIR
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -73,6 +74,7 @@ class SearchResponse(BaseModel):
     elapsed_ms: float
     suggested_query: str | None = None
     alternatives: dict[str, list[str]] = Field(default_factory=dict)
+    deferred_suggestion: bool = False  # локальная подсказка загружается после выдачи
 
 
 # сведения об индексе и доступности словаря на момент запуска сервиса
@@ -204,6 +206,51 @@ class SearchService:
         self.resources.close()
 
 
+class TantivyService:
+    """ищем локально; вычисление подсказки не задерживает основную выдачу."""
+    def __init__(self, path: Path, spelling: bool = True) -> None:
+        from habr_search.retrieval.tantivy_index import TantivySearch
+        self.backend: TantivySearch = TantivySearch(path)
+        self.dictionary: SpellingDictionary | None = load_dictionary(path / 'spelling.sqlite3') if spelling else None
+        if self.dictionary is not None:
+            self.dictionary.validate_context('tantivy', self.backend.info.articles, self.backend.info.revision)
+
+    def health(self) -> HealthResponse:
+        return HealthResponse(collection='tantivy', fragments=self.backend.info.articles,
+                              articles=self.backend.info.articles, spelling_available=self.dictionary is not None)
+
+    def suggest(self, query: str) -> SuggestionResponse:
+        from habr_search.retrieval.tantivy_index import literal_query
+        literal_query(query)
+        if self.dictionary is None:
+            return SuggestionResponse(original_query=query, corrected_query=query, available=False, alternatives={})
+        spelling = self.dictionary.suggest(query)
+        return SuggestionResponse(original_query=query, corrected_query=spelling.corrected, available=True,
+                                  alternatives={item.original: [candidate.word for candidate in item.candidates]
+                                                for item in spelling.suggestions})
+
+    def search(self, request: SearchRequest) -> SearchResponse:
+        start = perf_counter()
+        query = request.query.strip()
+        if request.correct_typos:
+            suggestion = self.suggest(query)
+            if not suggestion.available:
+                raise ValueError('словарь опечаток не загружен')
+            query = suggestion.corrected_query
+        found = self.backend.search(query, request.top_k)
+        return SearchResponse(original_query=request.query, used_query=query,
+                              corrected=query != request.query.strip(),
+                              results=[ArticleResponse(article_id=item.article_id, title=item.title,
+                                                       url=item.url, snippet=item.snippet, score=item.score)
+                                       for item in found],
+                              elapsed_ms=round((perf_counter() - start) * 1000, 1),
+                              deferred_suggestion=self.dictionary is not None and not request.correct_typos)
+
+    def close(self) -> None:
+        # снимок индекса не содержит открытого писателя или сетевых подключений
+        pass
+
+
 # настройки подключений, локальных файлов и подготовки поискового запроса
 @dataclass(frozen=True)
 class WebConfig:
@@ -305,6 +352,8 @@ def create_app(factory: Callable[[], SearchBackend]) -> FastAPI:
 
 # параметры запуска локального сервера и подключения к индексу
 class CliArgs(argparse.Namespace):
+    engine: str
+    tantivy_path: Path
     qdrant_url: str | None
     qdrant_path: Path | None
     tokenizer_file: Path
@@ -321,6 +370,8 @@ class CliArgs(argparse.Namespace):
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--engine', choices=['gemma', 'tantivy'], default='gemma')
+    parser.add_argument('--tantivy-path', type=Path, default=DATA_DIR / 'tantivy')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
@@ -337,6 +388,14 @@ def main() -> int:
     if not 1 <= args.port <= 65535 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('нужны допустимый port и положительный конечный timeout')
     try:
+        if args.engine == 'tantivy':
+            if args.min_score is not None or args.raw_query or args.qdrant_url or args.qdrant_path:
+                raise ValueError('параметры qdrant, raw-query и min-score относятся к режиму gemma')
+            # ключ, токенизатор, docker и api модели для этого режима не нужны
+            print(f'страница поиска: http://127.0.0.1:{args.port}')
+            uvicorn.run(create_app(lambda: TantivyService(args.tantivy_path, not args.without_spelling)),
+                        host='127.0.0.1', port=args.port, log_level='warning', access_log=False)
+            return 0
         validate_min_score(args.min_score)
         store = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if store.path is not None and not store.path.is_dir():
