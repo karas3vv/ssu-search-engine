@@ -134,12 +134,29 @@ class TantivySearch:
         """ищем по заголовкам и текстам; отрывок выбираем рядом с совпадением."""
         if not 1 <= top_k <= 20:
             raise ValueError('top_k должен быть от 1 до 20')
+        return self.candidates(text, top_k)
+
+    def article_ids(self) -> frozenset[int]:
+        """читаем id снимка один раз для проверки состава гибридного индекса."""
+        hits = self.searcher.search(tantivy.Query.all_query(), limit=self.info.articles, count=False)
+        ids: set[int] = set()
+        for _, address in hits.hits:
+            article_id: object = self.searcher.doc(address).get_first('article_id')
+            if type(article_id) is not int or article_id < 1 or article_id in ids:
+                raise ValueError('повреждены или повторяются id статей tantivy')
+            ids.add(article_id)
+        return frozenset(ids)
+
+    def candidates(self, text: str, limit: int = 20) -> list[LexicalResult]:
+        """гибриду доступен более глубокий список, размер обычной выдачи не меняется."""
+        if not 1 <= limit <= 100:
+            raise ValueError('число кандидатов должно быть от 1 до 100')
         query_text = literal_query(text)
         if not query_text:
             return []
         query = self.index.parse_query(query_text, ['title', 'body'],
                                        field_boosts={'title': 3.0, 'body': 1.0})
-        hits = self.searcher.search(query, limit=top_k, count=False)
+        hits = self.searcher.search(query, limit=limit, count=False)
         snippets = tantivy.SnippetGenerator.create(self.searcher, query, self.index.schema, 'body')
         snippets.set_max_num_chars(350)
         results: list[LexicalResult] = []

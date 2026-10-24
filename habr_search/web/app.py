@@ -32,7 +32,9 @@ from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant
 from qdrant_client import QdrantClient
 from habr_search.index_version import index_revision
 from habr_search.paths import DATA_DIR
-from habr_search.model_profiles import GEMMA, ModelProfile, deployment_name, get_profile
+from habr_search.retrieval.hybrid import HybridConfig, HybridRetriever
+from habr_search.retrieval.tantivy_index import literal_query
+from habr_search.model_profiles import BGE_M3, GEMMA, ModelProfile, deployment_name, get_profile
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -57,7 +59,7 @@ class SuggestionResponse(BaseModel):
     alternatives: dict[str, list[str]]
 
 
-# одна карточка выдачи: статья, подходящий отрывок и оценка сходства
+# одна карточка выдачи: статья, подходящий отрывок и оценка выбранного поиска
 class ArticleResponse(BaseModel):
     article_id: int
     title: str
@@ -155,6 +157,44 @@ class SearchService:
                                   alternatives={item.original: [candidate.word for candidate in item.candidates]
                                                 for item in result.suggestions})
 
+    def _prepare_spelling(self, query: str, correct_typos: bool) -> tuple[str, dict[str, list[str]], str | None, bool]:
+        """подготавливаем подсказки, сохраняя прежнее поведение семантических режимов."""
+        alternatives: dict[str, list[str]] = {}
+        suggested_query: str | None = None
+        dictionary_available = self.dictionary is not None
+        if self.dictionary is not None:
+            try:
+                self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
+                                                 index_revision(self.store, self.name))
+            except ValueError:
+                # устаревший словарь не мешает искать исходную фразу, но не даёт подсказок
+                if correct_typos:
+                    raise
+                dictionary_available = False
+        if correct_typos and not dictionary_available:
+            raise ValueError('словарь опечаток не загружен')
+        if self.dictionary is not None and dictionary_available:
+            spelling = self.dictionary.suggest(query)
+            if correct_typos:
+                query = spelling.corrected
+            elif spelling.corrected != query:
+                suggested_query = spelling.corrected
+            # неприменённые варианты показываем отдельно, не меняя ими запрос
+            alternatives = {item.original: [candidate.word for candidate in item.candidates]
+                            for item in spelling.suggestions if item.replacement is None}
+        return query, alternatives, suggested_query, False
+
+    def _retrieve(self, query: str, vector: list[float], top_k: int) -> list[ArticleResponse]:
+        """обычный режим использует только семантическую выдачу."""
+        found = search_articles(self.store, self.name, vector, top_k, self.profile.vector_size, min_score=self.min_score)
+        results: list[ArticleResponse] = []
+        for item in found:
+            text = ' '.join(item.text.split())
+            snippet = text[:500] + ('…' if len(text) > 500 else '')
+            results.append(ArticleResponse(article_id=item.article_id, title=item.title, url=item.url,
+                                           snippet=snippet, score=item.score))
+        return results
+
     # ищем исходную фразу и отдельно предлагаем исправление; замена требует явного флага api
     def search(self, request: SearchRequest) -> SearchResponse:
         if not self.lock.acquire(blocking=False):
@@ -162,45 +202,16 @@ class SearchService:
         try:
             start = perf_counter()
             validate_collection(self.store, self.name, self.profile.vector_size)
-            query = request.query.strip()
-            alternatives: dict[str, list[str]] = {}
-            suggested_query: str | None = None
-            dictionary_available = self.dictionary is not None
-            if self.dictionary is not None:
-                try:
-                    self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
-                                                     index_revision(self.store, self.name))
-                except ValueError:
-                    # устаревший словарь не мешает искать исходную фразу, но не даёт подсказок
-                    if request.correct_typos:
-                        raise
-                    dictionary_available = False
-            if request.correct_typos and not dictionary_available:
-                raise ValueError('словарь опечаток не загружен')
-            if self.dictionary is not None and dictionary_available:
-                spelling = self.dictionary.suggest(query)
-                if request.correct_typos:
-                    query = spelling.corrected
-                elif spelling.corrected != query:
-                    suggested_query = spelling.corrected
-                # неприменённые варианты показываем отдельно, не меняя ими запрос
-                alternatives = {item.original: [candidate.word for candidate in item.candidates]
-                                for item in spelling.suggestions if item.replacement is None}
+            query, alternatives, suggested_query, deferred = self._prepare_spelling(request.query.strip(), request.correct_typos)
             prepared = build_query(query, self.raw_query, self.profile)
             if self.tokenizer.count(prepared) > self.profile.query_max_tokens:
                 raise ValueError(f'запрос вместе с инструкцией превышает {self.profile.query_max_tokens} токенов')
             # только этот вызов обращается к модели; повторов и фоновых поисков нет
             vector = self.embeddings.embed([prepared])[0]
-            found = search_articles(self.store, self.name, vector, request.top_k, self.profile.vector_size, min_score=self.min_score)
-            results: list[ArticleResponse] = []
-            for item in found:
-                text = ' '.join(item.text.split())
-                snippet = text[:500] + ('…' if len(text) > 500 else '')
-                results.append(ArticleResponse(article_id=item.article_id, title=item.title, url=item.url,
-                                               snippet=snippet, score=item.score))
+            results = self._retrieve(query, vector, request.top_k)
             return SearchResponse(original_query=request.query, used_query=query, corrected=query != request.query.strip(),
                                   results=results, elapsed_ms=round((perf_counter() - start) * 1000, 1),
-                                  alternatives=alternatives, suggested_query=suggested_query)
+                                  alternatives=alternatives, suggested_query=suggested_query, deferred_suggestion=deferred)
         finally:
             self.lock.release()
 
@@ -254,6 +265,42 @@ class TantivyService:
         pass
 
 
+class HybridService(SearchService):
+    """сохраняем общий путь с одним вызовом модели и отдельной локальной подсказкой."""
+    def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
+                 embeddings: EmbeddingProvider, local: TantivyService,
+                 config: HybridConfig = HybridConfig()) -> None:
+        super().__init__(store, name, tokenizer, embeddings, None, profile=BGE_M3)
+        self.local: TantivyService = local
+        self.hybrid: HybridRetriever = HybridRetriever(store, name, local.backend, config)
+        self.status.articles = local.health().articles
+        self.status.spelling_available = local.health().spelling_available
+
+    def search(self, request: SearchRequest) -> SearchResponse:
+        if request.top_k > self.hybrid.config.candidate_limit:
+            raise ValueError('top-k не должен превышать candidate-limit')
+        return super().search(request)
+
+    def suggest(self, query: str) -> SuggestionResponse:
+        return self.local.suggest(query)
+
+    def _prepare_spelling(self, query: str, correct_typos: bool) -> tuple[str, dict[str, list[str]], str | None, bool]:
+        # проверяем источники и длину до платного вызова; исходный текст не подменяем
+        self.hybrid.check_context()
+        literal_query(query)
+        if correct_typos:
+            suggestion = self.suggest(query)
+            if not suggestion.available:
+                raise ValueError('словарь опечаток не загружен')
+            return suggestion.corrected_query, suggestion.alternatives, None, False
+        return query, {}, None, self.status.spelling_available
+
+    def _retrieve(self, query: str, vector: list[float], top_k: int) -> list[ArticleResponse]:
+        run = self.hybrid.search(query, vector, top_k)
+        return [ArticleResponse(article_id=item.article_id, title=item.title, url=item.url,
+                                snippet=item.snippet, score=item.score) for item in run.results]
+
+
 # настройки подключений, локальных файлов и подготовки поискового запроса
 @dataclass(frozen=True)
 class WebConfig:
@@ -279,6 +326,23 @@ def connect_service(config: WebConfig) -> SearchService:
         embeddings = EmbeddingsClient(config.embeddings)
         resources.callback(embeddings.close)
         service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query, config.min_score, config.profile)
+        service.resources = resources.pop_all()
+        return service
+
+
+
+def connect_hybrid_service(config: WebConfig, path: Path, spelling: bool,
+                           hybrid_config: HybridConfig = HybridConfig()) -> HybridService:
+    """сбой подготовки освобождает подключения до первого платного запроса."""
+    with ExitStack() as resources:
+        store = connect_store(config.store)
+        resources.callback(store.close)
+        name = collection_name(config.embeddings.url, config.embeddings.model, config.chunking, BGE_M3)
+        local = TantivyService(path, spelling)
+        tokenizer = load_tokenizer(config.tokenizer_file, BGE_M3)
+        embeddings = EmbeddingsClient(config.embeddings)
+        resources.callback(embeddings.close)
+        service = HybridService(store, name, tokenizer, embeddings, local, hybrid_config)
         service.resources = resources.pop_all()
         return service
 
@@ -369,12 +433,14 @@ class CliArgs(argparse.Namespace):
     max_tokens: int
     overlap_tokens: int
     min_score: float | None
+    candidate_limit: int
+    rrf_k: float
 
 
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['gemma', 'bge-m3', 'tantivy'], default='gemma')
+    parser.add_argument('--engine', choices=['gemma', 'bge-m3', 'tantivy', 'hybrid'], default='gemma')
     parser.add_argument('--tantivy-path', type=Path, default=DATA_DIR / 'tantivy')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
@@ -387,6 +453,8 @@ def main() -> int:
     parser.add_argument('--raw-query', action='store_true')
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
+    parser.add_argument('--candidate-limit', type=int, default=20, help='кандидатов каждого источника в гибриде')
+    parser.add_argument('--rrf-k', type=float, default=60.0, help='сглаживание мест в гибриде')
     parser.add_argument('--min-score', type=float, help='проверенный порог сходства; по умолчанию выключен')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not 1 <= args.port <= 65535 or not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -400,11 +468,16 @@ def main() -> int:
             uvicorn.run(create_app(lambda: TantivyService(args.tantivy_path, not args.without_spelling)),
                         host='127.0.0.1', port=args.port, log_level='warning', access_log=False)
             return 0
+        hybrid_config = HybridConfig(args.candidate_limit, args.rrf_k)
+        if args.engine == 'hybrid' and (args.min_score is not None or args.raw_query or args.spelling_db is not None):
+            raise ValueError('гибрид не использует min-score, raw-query и spelling-db; словарь берётся из tantivy')
+        if args.engine == 'hybrid' and args.candidate_limit < 20:
+            raise ValueError('для веб-выдачи до 20 статей candidate-limit должен быть не меньше 20')
         validate_min_score(args.min_score)
         store = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if store.path is not None and not store.path.is_dir():
             raise ValueError('локальный qdrant не найден; укажите --qdrant-url')
-        profile = get_profile('bge-m3' if args.engine == 'bge-m3' else 'gemma2')
+        profile = get_profile('bge-m3' if args.engine in ('bge-m3', 'hybrid') else 'gemma2')
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         key = read_api_key()
         embeddings = EmbeddingConfig(key, os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
@@ -414,7 +487,12 @@ def main() -> int:
                            chunking, args.raw_query, args.min_score, profile)
         print(f'страница поиска: http://127.0.0.1:{args.port}')
         print('получение выдачи обращается к mws; открытие страницы и проверка опечаток — нет')
-        uvicorn.run(create_app(lambda: connect_service(config)), host='127.0.0.1', port=args.port,
+        factory: Callable[[], SearchBackend]
+        if args.engine == 'hybrid':
+            factory = lambda: connect_hybrid_service(config, args.tantivy_path, not args.without_spelling, hybrid_config)
+        else:
+            factory = lambda: connect_service(config)
+        uvicorn.run(create_app(factory), host='127.0.0.1', port=args.port,
                     log_level='warning', access_log=False)
         return 0
     except (ValueError, OSError, RuntimeError) as exc:
