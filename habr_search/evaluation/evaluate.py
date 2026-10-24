@@ -20,14 +20,15 @@ from time import perf_counter
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
-from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.chunking import ChunkingConfig, TextTokenizer, load_tokenizer
+from habr_search.embeddings import DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
 from habr_search.ingestion.index import VECTOR_SIZE, EmbeddingProvider, collection_name
 from habr_search.retrieval.search import (
-    MAX_QUERY_TOKENS, build_query, search_articles, validate_collection, validate_min_score,
+    build_query, search_articles, validate_collection, validate_min_score,
 )
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import UNVERSIONED, index_revision
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
 
 from habr_search.paths import PROJECT_ROOT as ROOT
 
@@ -188,12 +189,13 @@ def print_summary(results: Sequence[QueryEvaluation], top_k: int, label: str = '
 # добавляем инструкцию модели и проверяем длину всех ещё не выполненных запросов
 def prepare_queries(
     cases: Sequence[EvaluationQuery], tokenizer: TextTokenizer, raw_query: bool = False,
+    profile: ModelProfile = GEMMA,
 ) -> list[tuple[EvaluationQuery, str]]:
     prepared: list[tuple[EvaluationQuery, str]] = []
     for case in cases:
-        text = build_query(case.query, raw_query)
-        if tokenizer.count(text) > MAX_QUERY_TOKENS:
-            raise ValueError(f'{case.query_id}: запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов')
+        text = build_query(case.query, raw_query, profile)
+        if tokenizer.count(text) > profile.query_max_tokens:
+            raise ValueError(f'{case.query_id}: запрос вместе с инструкцией превышает {profile.query_max_tokens} токенов')
         prepared.append((case, text))
     return prepared
 
@@ -334,7 +336,8 @@ class CliArgs(argparse.Namespace):
     top_k: int
     qdrant_url: str | None
     qdrant_path: Path | None
-    tokenizer_file: Path
+    tokenizer_file: Path | None
+    embedding_model: str
     max_tokens: int
     overlap_tokens: int
     raw_query: bool
@@ -356,7 +359,8 @@ def main() -> int:
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
-    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
     parser.add_argument('--raw-query', action='store_true')
@@ -367,6 +371,7 @@ def main() -> int:
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error('timeout должен быть положительным конечным числом')
     try:
+        profile = get_profile(args.embedding_model)
         validate_min_score(args.min_score)
         cases = load_queries(args.queries)
         if args.limit is not None:
@@ -390,11 +395,11 @@ def main() -> int:
         if config.path is not None and not config.path.is_dir():
             raise ValueError('локальное хранилище не найдено; задайте --qdrant-url')
         url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
-        deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
-        name = collection_name(url, deployment, chunking)
+        deployment = deployment_name(profile)
+        name = collection_name(url, deployment, chunking, profile)
         with closing(connect_store(config)) as store:
             # весь набор проверяется до первого платного запроса
-            validate_collection(store, name)
+            validate_collection(store, name, profile.vector_size)
             validate_expected_articles(store, name, cases)
             point_count = store.count(name, exact=True).count
             revision = index_revision(store, name)
@@ -403,7 +408,7 @@ def main() -> int:
             saved = load_report(args.resume, cases, context) if args.resume is not None else {}
             # оставляем для модели только запросы без готового результата
             pending = [case for case in cases if case.query_id not in saved]
-            prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file), args.raw_query) if pending else []
+            prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file, profile), args.raw_query, profile) if pending else []
             print(f'из отчёта: {len(saved)}; осталось запросов: {len(pending)}')
             backend: EmbeddingsClient | None = None
             embedding_config: EmbeddingConfig | None = None
@@ -431,7 +436,7 @@ def main() -> int:
                 if backend is not None:
                     if index_revision(store, name) != revision:
                         raise ValueError('версия индекса изменилась до начала оценки')
-                    for result in evaluate_queries(prepared, store, name, backend, args.top_k,
+                    for result in evaluate_queries(prepared, store, name, backend, args.top_k, profile.vector_size,
                                                    expected_revision=revision, min_score=args.min_score):
                         rank = result.first_relevant_rank
                         writer.writerow(report_row(ReportEntry(started.isoformat(), result), context))

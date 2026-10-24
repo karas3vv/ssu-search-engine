@@ -41,4 +41,4 @@ PY
 # передаём управление серверу, чтобы ctrl+c завершал приложение
 exec "$python_bin" -m habr_search.web.app \
     --qdrant-url http://127.0.0.1:6333 \
-    --spelling-db data/spelling-full.sqlite3 "$@"
+    "$@"

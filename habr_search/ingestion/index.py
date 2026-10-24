@@ -18,17 +18,19 @@ from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from habr_search.ingestion.chunking import (
-    CHUNKING_VERSION, DEFAULT_TOKENIZER, MODEL_ID, MODEL_REVISION,
+    CHUNKING_VERSION,
     ArticleChunk, ChunkingConfig, chunk_article, load_tokenizer,
 )
 from habr_search.embeddings import (
-    DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key,
+    DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key,
 )
 from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, iter_prepared_articles
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import invalidate_index
 
-VECTOR_SIZE: int = 3584  # размерность, которую вернул проверенный деплоймент parser
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+
+VECTOR_SIZE: int = GEMMA.vector_size  # размерность, которую вернул проверенный деплоймент parser
 
 
 # интерфейс позволяет проверять запись в qdrant без настоящих запросов в mws
@@ -45,17 +47,17 @@ class IndexStats:
 
 
 # вычисляем имя коллекции из настроек модели и разбиения
-def collection_name(url: str, deployment: str, config: ChunkingConfig) -> str:
+def collection_name(url: str, deployment: str, config: ChunkingConfig, profile: ModelProfile = GEMMA) -> str:
     # другой деплоймент или настройки разбиения получают отдельную коллекцию
     # настройки входят в отпечаток, чтобы случайно не смешать несовместимые векторы
     settings = {
-        'url': url, 'deployment': deployment, 'model': MODEL_ID,
-        'revision': MODEL_REVISION, 'chunking_version': CHUNKING_VERSION,
+        'url': url, 'deployment': deployment, 'model': profile.model_id,
+        'revision': profile.revision, 'chunking_version': CHUNKING_VERSION,
         'max_tokens': config.max_tokens, 'overlap_tokens': config.overlap_tokens,
-        'vector_size': VECTOR_SIZE,
+        'vector_size': profile.vector_size,
     }
     signature = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:12]
-    return f'habr_gemma2_{signature}'
+    return f'habr_{profile.name.replace("-", "_")}_{signature}'
 
 
 # создаём подходящую коллекцию либо проверяем совместимость существующей
@@ -81,9 +83,10 @@ def ensure_collection(
 def index_chunks(
     chunks: list[ArticleChunk], text_hash: str, store: QdrantClient,
     name: str, embeddings: EmbeddingProvider, batch_size: int = 4,
-    vector_size: int = VECTOR_SIZE,
+    vector_size: int | None = None, *, profile: ModelProfile = GEMMA,
 ) -> IndexStats:
     """сохраняем одну статью пакетами; повторный запуск пропускает готовые точки."""
+    vector_size = profile.vector_size if vector_size is None else vector_size
     if batch_size < 1 or not chunks:
         raise ValueError('нужны фрагменты статьи и положительный размер пакета')
     article_id = chunks[0].article_id
@@ -114,7 +117,7 @@ def index_chunks(
                     'hubs': list(chunk.hubs), 'published_at': chunk.published_at,
                     'start_char': chunk.start_char, 'end_char': chunk.end_char,
                     'token_count': chunk.token_count, 'text_hash': text_hash,
-                    'model': MODEL_ID, 'model_revision': MODEL_REVISION,
+                    'model': profile.model_id, 'model_revision': profile.revision,
                     'chunking_version': CHUNKING_VERSION,
                 },
             )
@@ -139,7 +142,8 @@ def index_chunks(
 # настройки чтения корпуса, разбиения, отправки пакетов и подключения к qdrant
 class CliArgs(argparse.Namespace):
     source: Path
-    tokenizer_file: Path
+    tokenizer_file: Path | None
+    embedding_model: str
     qdrant_path: Path | None
     qdrant_url: str | None
     limit: int
@@ -154,7 +158,8 @@ class CliArgs(argparse.Namespace):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--tokenizer-file', type=Path)
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного режима')
     location.add_argument('--qdrant-url', help='адрес сервера, например http://127.0.0.1:6333')
@@ -175,10 +180,11 @@ def main() -> int:
     try:
         config = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         store_config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
-        tokenizer = load_tokenizer(args.tokenizer_file)
+        profile = get_profile(args.embedding_model)
+        tokenizer = load_tokenizer(args.tokenizer_file, profile)
         url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
-        deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
-        name = collection_name(url, deployment, config)
+        deployment = deployment_name(profile)
+        name = collection_name(url, deployment, config, profile)
         prepared_stats = PreparationStats()
         total = IndexStats()
         article_count = 0
@@ -191,16 +197,16 @@ def main() -> int:
                 # проверяем qdrant до запроса ключа и платных обращений в mws
                 store = connect_store(store_config)
                 stack.callback(store.close)
-                ensure_collection(store, name, create_article_index=store_config.url is not None)
+                ensure_collection(store, name, profile.vector_size, create_article_index=store_config.url is not None)
                 key = read_api_key()
                 # ожидание не входит в имя коллекции и не меняет id ранее записанных фрагментов
                 embedding_config = EmbeddingConfig(key, url, deployment, timeout_seconds=args.timeout_seconds)
                 embeddings = stack.enter_context(closing(EmbeddingsClient(embedding_config)))
             for article in islice(prepared, args.limit):
-                chunks = list(chunk_article(article, tokenizer, config))
+                chunks = list(chunk_article(article, tokenizer, config, profile))
                 chunk_count += len(chunks)
                 if store is not None and embeddings is not None:
-                    stats = index_chunks(chunks, article.text_hash, store, name, embeddings, args.batch_size)
+                    stats = index_chunks(chunks, article.text_hash, store, name, embeddings, args.batch_size, profile=profile)
                     total.saved += stats.saved
                     total.skipped += stats.skipped
                 article_count += 1

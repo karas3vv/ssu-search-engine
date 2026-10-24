@@ -21,17 +21,18 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, TextTokenizer, load_tokenizer
-from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.chunking import ChunkingConfig, TextTokenizer, load_tokenizer
+from habr_search.embeddings import DEFAULT_URL, EmbeddingAPIError, EmbeddingConfig, EmbeddingsClient, read_api_key
 from habr_search.ingestion.index import EmbeddingProvider, collection_name
 from habr_search.retrieval.search import (
-    MAX_QUERY_TOKENS, build_query, search_articles, validate_collection, validate_min_score,
+    build_query, search_articles, validate_collection, validate_min_score,
 )
 from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, MAX_QUERY_CHARS, SpellingDictionary, load_dictionary
 from habr_search.vector_store import QdrantConfig, connect_store, resolve_qdrant_config
 from qdrant_client import QdrantClient
 from habr_search.index_version import index_revision
 from habr_search.paths import DATA_DIR
+from habr_search.model_profiles import GEMMA, ModelProfile, deployment_name, get_profile
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -106,9 +107,10 @@ class SearchService:
     # проверяем совместимость индекса и словаря до обработки пользовательских запросов
     def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
                  embeddings: EmbeddingProvider, dictionary: SpellingDictionary | None,
-                 raw_query: bool = False, min_score: float | None = None) -> None:
+                 raw_query: bool = False, min_score: float | None = None,
+                 profile: ModelProfile = GEMMA) -> None:
         validate_min_score(min_score)
-        validate_collection(store, name)
+        validate_collection(store, name, profile.vector_size)
         points = store.count(name, exact=True).count
         if dictionary is not None:
             try:
@@ -117,6 +119,7 @@ class SearchService:
                 # старый словарь отключает только подсказки, исходный поиск остаётся доступен
                 logging.warning('словарь устарел; подсказки отключены до пересборки')
                 dictionary = None
+        self.profile: ModelProfile = profile
         self.store: QdrantClient = store
         self.name: str = name
         self.tokenizer: TextTokenizer = tokenizer
@@ -138,7 +141,7 @@ class SearchService:
 
     # проверяем фразу и возвращаем варианты из уже загруженного словаря
     def suggest(self, query: str) -> SuggestionResponse:
-        build_query(query)
+        build_query(query, profile=self.profile)
         if self.dictionary is not None:
             try:
                 self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
@@ -158,7 +161,7 @@ class SearchService:
             raise SearchBusyError('поиск уже выполняется; дождитесь результата')
         try:
             start = perf_counter()
-            validate_collection(self.store, self.name)
+            validate_collection(self.store, self.name, self.profile.vector_size)
             query = request.query.strip()
             alternatives: dict[str, list[str]] = {}
             suggested_query: str | None = None
@@ -183,12 +186,12 @@ class SearchService:
                 # неприменённые варианты показываем отдельно, не меняя ими запрос
                 alternatives = {item.original: [candidate.word for candidate in item.candidates]
                                 for item in spelling.suggestions if item.replacement is None}
-            prepared = build_query(query, self.raw_query)
-            if self.tokenizer.count(prepared) > MAX_QUERY_TOKENS:
-                raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов')
+            prepared = build_query(query, self.raw_query, self.profile)
+            if self.tokenizer.count(prepared) > self.profile.query_max_tokens:
+                raise ValueError(f'запрос вместе с инструкцией превышает {self.profile.query_max_tokens} токенов')
             # только этот вызов обращается к модели; повторов и фоновых поисков нет
             vector = self.embeddings.embed([prepared])[0]
-            found = search_articles(self.store, self.name, vector, request.top_k, min_score=self.min_score)
+            found = search_articles(self.store, self.name, vector, request.top_k, self.profile.vector_size, min_score=self.min_score)
             results: list[ArticleResponse] = []
             for item in found:
                 text = ' '.join(item.text.split())
@@ -256,11 +259,12 @@ class TantivyService:
 class WebConfig:
     store: QdrantConfig
     embeddings: EmbeddingConfig
-    tokenizer_file: Path = DEFAULT_TOKENIZER
+    tokenizer_file: Path | None = None
     dictionary_file: Path | None = DEFAULT_DICTIONARY
     chunking: ChunkingConfig = ChunkingConfig()
     raw_query: bool = False
     min_score: float | None = None  # выбранный порог задаёт сервер, а не браузер
+    profile: ModelProfile = GEMMA
 
 
 def connect_service(config: WebConfig) -> SearchService:
@@ -268,13 +272,13 @@ def connect_service(config: WebConfig) -> SearchService:
     with ExitStack() as resources:
         store = connect_store(config.store)
         resources.callback(store.close)
-        name = collection_name(config.embeddings.url, config.embeddings.model, config.chunking)
-        validate_collection(store, name)
-        tokenizer = load_tokenizer(config.tokenizer_file)
+        name = collection_name(config.embeddings.url, config.embeddings.model, config.chunking, config.profile)
+        validate_collection(store, name, config.profile.vector_size)
+        tokenizer = load_tokenizer(config.tokenizer_file, config.profile)
         dictionary = load_dictionary(config.dictionary_file) if config.dictionary_file is not None else None
         embeddings = EmbeddingsClient(config.embeddings)
         resources.callback(embeddings.close)
-        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query, config.min_score)
+        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query, config.min_score, config.profile)
         service.resources = resources.pop_all()
         return service
 
@@ -356,8 +360,8 @@ class CliArgs(argparse.Namespace):
     tantivy_path: Path
     qdrant_url: str | None
     qdrant_path: Path | None
-    tokenizer_file: Path
-    spelling_db: Path
+    tokenizer_file: Path | None
+    spelling_db: Path | None
     without_spelling: bool
     port: int
     timeout: float
@@ -370,13 +374,13 @@ class CliArgs(argparse.Namespace):
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['gemma', 'tantivy'], default='gemma')
+    parser.add_argument('--engine', choices=['gemma', 'bge-m3', 'tantivy'], default='gemma')
     parser.add_argument('--tantivy-path', type=Path, default=DATA_DIR / 'tantivy')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
-    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
-    parser.add_argument('--spelling-db', type=Path, default=DEFAULT_DICTIONARY)
+    parser.add_argument('--tokenizer-file', type=Path)
+    parser.add_argument('--spelling-db', type=Path)
     parser.add_argument('--without-spelling', action='store_true')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--timeout', type=float, default=300)
@@ -390,7 +394,7 @@ def main() -> int:
     try:
         if args.engine == 'tantivy':
             if args.min_score is not None or args.raw_query or args.qdrant_url or args.qdrant_path:
-                raise ValueError('параметры qdrant, raw-query и min-score относятся к режиму gemma')
+                raise ValueError('параметры qdrant, raw-query и min-score относятся к семантическому режиму')
             # ключ, токенизатор, docker и api модели для этого режима не нужны
             print(f'страница поиска: http://127.0.0.1:{args.port}')
             uvicorn.run(create_app(lambda: TantivyService(args.tantivy_path, not args.without_spelling)),
@@ -400,12 +404,14 @@ def main() -> int:
         store = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if store.path is not None and not store.path.is_dir():
             raise ValueError('локальный qdrant не найден; укажите --qdrant-url')
+        profile = get_profile('bge-m3' if args.engine == 'bge-m3' else 'gemma2')
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         key = read_api_key()
         embeddings = EmbeddingConfig(key, os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
-                                     os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL), args.timeout)
+                                     deployment_name(profile), args.timeout)
         config = WebConfig(store, embeddings, args.tokenizer_file,
-                           None if args.without_spelling else args.spelling_db, chunking, args.raw_query, args.min_score)
+                           None if args.without_spelling else (args.spelling_db or profile.dictionary_file),
+                           chunking, args.raw_query, args.min_score, profile)
         print(f'страница поиска: http://127.0.0.1:{args.port}')
         print('получение выдачи обращается к mws; открытие страницы и проверка опечаток — нет')
         uvicorn.run(create_app(lambda: connect_service(config)), host='127.0.0.1', port=args.port,

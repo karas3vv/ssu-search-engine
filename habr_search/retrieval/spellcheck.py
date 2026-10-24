@@ -14,7 +14,8 @@ from qdrant_client.conversions import common_types as qdrant_types
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from habr_search.ingestion.chunking import ChunkingConfig
-from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL
+from habr_search.embeddings import DEFAULT_URL
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, deployment_name, get_profile
 from habr_search.evaluation.evaluate import QUERY_COLUMNS, EvaluationQuery, load_queries
 from habr_search.ingestion.index import collection_name
 from habr_search.retrieval.spelling import (
@@ -108,7 +109,8 @@ def print_suggestions(result: SpellingResult) -> None:
 # параметры построения словаря, проверки фразы и подготовки контрольных запросов
 class CliArgs(argparse.Namespace):
     command: str
-    dictionary: Path
+    dictionary: Path | None
+    embedding_model: str
     qdrant_url: str | None
     qdrant_path: Path | None
     max_tokens: int
@@ -123,7 +125,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     build = commands.add_parser('build', help='собрать словарь из существующей коллекции')
-    build.add_argument('--dictionary', type=Path, default=DEFAULT_DICTIONARY)
+    build.add_argument('--dictionary', type=Path)
+    build.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
     location = build.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
@@ -143,15 +146,17 @@ def main() -> int:
             if config.path is not None and not config.path.is_dir():
                 raise ValueError('локальный qdrant не найден; укажите --qdrant-url')
             url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
-            deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
-            name = collection_name(url, deployment, ChunkingConfig(args.max_tokens, args.overlap_tokens))
+            profile = get_profile(args.embedding_model)
+            deployment = deployment_name(profile)
+            dictionary_path = args.dictionary or profile.dictionary_file
+            name = collection_name(url, deployment, ChunkingConfig(args.max_tokens, args.overlap_tokens), profile)
             with closing(connect_store(config)) as store:
-                info = build_dictionary(store, name, args.dictionary)
-            print(f'словарь: {args.dictionary}')
+                info = build_dictionary(store, name, dictionary_path)
+            print(f'словарь: {dictionary_path}')
             print(f'коллекция: {info.collection}; фрагментов: {info.points}; статей: {info.articles}')
             print(f'отпечаток словаря: {info.sha256}')
         else:
-            dictionary = load_dictionary(args.dictionary)
+            dictionary = load_dictionary(args.dictionary or DEFAULT_DICTIONARY)
             if args.command == 'suggest':
                 print_suggestions(dictionary.suggest(args.query))
             else:

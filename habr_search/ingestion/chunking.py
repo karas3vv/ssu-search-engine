@@ -21,16 +21,14 @@ from tokenizers.processors import TemplateProcessing
 
 from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, PreparedArticle, iter_prepared_articles
 
-from habr_search.paths import MODELS_DIR
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, get_profile
 
 # фиксируем версию, чтобы одинаковые настройки всегда давали одинаковые фрагменты
-MODEL_ID: str = 'BAAI/bge-multilingual-gemma2'
-MODEL_REVISION: str = '8365500e19bc804136f4ad12c2494430239a2d72'
+MODEL_ID: str = GEMMA.model_id
+MODEL_REVISION: str = GEMMA.revision
 MODEL_MAX_TOKENS: int = 8192  # предел модели; у удалённого деплоймента лимит может быть ниже
 CHUNKING_VERSION: str = '2'
-DEFAULT_TOKENIZER: Path = (
-    MODELS_DIR / MODEL_ID / MODEL_REVISION / 'tokenizer.json'
-)
+DEFAULT_TOKENIZER: Path = GEMMA.tokenizer_file
 
 
 # настройки относятся ко всему входу модели: заголовку, фрагменту и специальным токенам
@@ -72,18 +70,18 @@ class TextTokenizer(Protocol):
     def count(self, text: str) -> int: ...
 
 
-# обёртка над файлом токенизатора gemma; веса модели здесь не загружаются
+# обёртка над токенизатором выбранной модели; веса здесь не загружаются
 class ModelTokenizer:
-    # проверяем формат токенизатора и включаем специальные токены gemma
-    def __init__(self, path: Path) -> None:
+    # проверяем формат токенизатора и включаем специальные токены профиля
+    def __init__(self, path: Path, profile: ModelProfile = GEMMA) -> None:
         self.tokenizer: Tokenizer = Tokenizer.from_file(str(path))
-        # отклоняем старый кеш e5 и файлы с несовместимыми специальными токенами
-        if self.tokenizer.token_to_id('<bos>') != 2 or self.tokenizer.token_to_id('<eos>') != 1:
-            raise ValueError('нужен tokenizer.json модели bge-multilingual-gemma2')
-        # настройки gemma требуют bos и eos; учитываем оба при подсчёте длины
+        # чужой файл отклоняется, даже если он лежит в ожидаемой папке
+        if (self.tokenizer.token_to_id(profile.bos_token) != profile.bos_id
+                or self.tokenizer.token_to_id(profile.eos_token) != profile.eos_id):
+            raise ValueError(f'нужен tokenizer.json модели {profile.model_id}')
         self.tokenizer.post_processor = TemplateProcessing(
-            single='<bos> $A <eos>',
-            special_tokens=[('<bos>', 2), ('<eos>', 1)],
+            single=f'{profile.bos_token} $A {profile.eos_token}',
+            special_tokens=[(profile.bos_token, profile.bos_id), (profile.eos_token, profile.eos_id)],
         )
         # запрещаем скрытое обрезание входа и добавление пустых токенов
         self.tokenizer.no_truncation()
@@ -98,12 +96,13 @@ class ModelTokenizer:
         return len(self.tokenizer.encode(text, add_special_tokens=True).ids)
 
 
-def load_tokenizer(path: Path = DEFAULT_TOKENIZER) -> ModelTokenizer:
+def load_tokenizer(path: Path | None = None, profile: ModelProfile = GEMMA) -> ModelTokenizer:
     """скачиваем только токенизатор при первом запуске и затем используем локальный файл."""
+    path = path if path is not None else profile.tokenizer_file
     if path.exists():
-        return ModelTokenizer(path)
+        return ModelTokenizer(path, profile)
     path.parent.mkdir(parents=True, exist_ok=True)
-    url = f'https://huggingface.co/{MODEL_ID}/resolve/{MODEL_REVISION}/tokenizer.json'
+    url = f'https://huggingface.co/{profile.model_id}/resolve/{profile.revision}/tokenizer.json'
     temporary: Path | None = None
     try:
         # временный файл не оставит повреждённый кеш при обрыве загрузки
@@ -113,7 +112,7 @@ def load_tokenizer(path: Path = DEFAULT_TOKENIZER) -> ModelTokenizer:
                 temporary = Path(stream.name)
                 for block in response.iter_content(chunk_size=1024 * 1024):
                     stream.write(block)
-        tokenizer = ModelTokenizer(temporary)
+        tokenizer = ModelTokenizer(temporary, profile)
         temporary.replace(path)
         return tokenizer
     finally:
@@ -128,12 +127,13 @@ def embedding_header(title: str, tokenizer: TextTokenizer, max_tokens: int) -> s
     title_limit = min(64, max_tokens // 4)
     if len(offsets) > title_limit:
         title = title[:offsets[title_limit][0]].rstrip()
-    # документы gemma получают обычный текст без префикса passage из e5
+    # обе модели получают заголовок и текст без префикса passage из e5
     return title + '\n\n'
 
 
 def chunk_article(
     article: PreparedArticle, tokenizer: TextTokenizer, config: ChunkingConfig,
+    profile: ModelProfile = GEMMA,
 ) -> Iterator[ArticleChunk]:
     """разбиваем текст по токенам, стараясь завершать фрагменты на переносах строк."""
     offsets = tokenizer.offsets(article.text)
@@ -172,7 +172,7 @@ def chunk_article(
         # настройки и содержимое входят в id, поэтому повторный запуск не создаёт новые точки
         fingerprint = hashlib.sha256(embedding_text.encode('utf-8')).hexdigest()
         identity = (
-            f'habr:{article.id}:{article.text_hash}:{CHUNKING_VERSION}:{MODEL_REVISION}:'
+            f'habr:{article.id}:{article.text_hash}:{CHUNKING_VERSION}:{profile.revision}:'
             f'{config.max_tokens}:{config.overlap_tokens}:{chunk_index}:{fingerprint}'
         )
         yield ArticleChunk(
@@ -192,7 +192,8 @@ def chunk_article(
 # типы аргументов позволяют анализатору редактора проверять запуск
 class CliArgs(argparse.Namespace):
     source: Path
-    tokenizer_file: Path
+    tokenizer_file: Path | None
+    embedding_model: str
     limit: int
     max_tokens: int
     overlap_tokens: int
@@ -203,7 +204,8 @@ class CliArgs(argparse.Namespace):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='база исходных статей')
-    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER, help='путь к локальному токенизатору')
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--tokenizer-file', type=Path, help='путь к токенизатору выбранной модели')
     parser.add_argument('--limit', type=int, default=5, help='сколько статей проверить')
     parser.add_argument('--max-tokens', type=int, default=1024, help='лимит входа модели вместе с заголовком')
     parser.add_argument('--overlap-tokens', type=int, default=128, help='перекрытие соседних фрагментов')
@@ -215,7 +217,8 @@ def main() -> int:
         parser.error(f'исходная база не найдена: {args.source}')
     try:
         config = ChunkingConfig(args.max_tokens, args.overlap_tokens)
-        tokenizer = load_tokenizer(args.tokenizer_file)
+        profile = get_profile(args.embedding_model)
+        tokenizer = load_tokenizer(args.tokenizer_file, profile)
         stats = PreparationStats()
         articles = 0
         chunks = 0
@@ -224,7 +227,7 @@ def main() -> int:
         with closing(iter_prepared_articles(args.source, stats)) as prepared:
             for article in islice(prepared, args.limit):
                 articles += 1
-                for chunk in chunk_article(article, tokenizer, config):
+                for chunk in chunk_article(article, tokenizer, config, profile):
                     chunks += 1
                     max_length = max(max_length, chunk.token_count)
                     if chunks <= args.preview:

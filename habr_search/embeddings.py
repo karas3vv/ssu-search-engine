@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+
 DEFAULT_URL: str = 'https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings'
 DEFAULT_MODEL: str = 'parser'  # имя деплоймента в mws, а не имя модели на hugging face
 
@@ -45,11 +47,11 @@ class EmbeddingConfig:
 
     # берём адрес и имя деплоймента из окружения, используя переданный ключ
     @classmethod
-    def from_env(cls, api_key: str) -> EmbeddingConfig:
+    def from_env(cls, api_key: str, profile: ModelProfile = GEMMA) -> EmbeddingConfig:
         return cls(
             api_key=api_key,
             url=os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
-            model=os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL),
+            model=deployment_name(profile),
         )
 
 
@@ -168,6 +170,7 @@ class EmbeddingsClient:
 # параметры отдельной проверки подключения к модели
 class CliArgs(argparse.Namespace):
     text: str
+    embedding_model: str
 
 
 def read_api_key() -> str:
@@ -189,6 +192,7 @@ def read_api_key() -> str:
 # проверяем один текст и показываем размерность полученного вектора
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
     parser.add_argument('--text', default='Привет, как дела?', help='один текст для проверки api')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not args.text.strip():
@@ -198,9 +202,12 @@ def main() -> int:
     except ValueError as exc:
         parser.exit(1, f'{exc}\n')
     try:
-        config = EmbeddingConfig.from_env(api_key)
+        profile = get_profile(args.embedding_model)
+        config = EmbeddingConfig.from_env(api_key, profile)
         with closing(EmbeddingsClient(config)) as client:
             vector = client.embed([args.text])[0]
+            if len(vector) != profile.vector_size:
+                raise EmbeddingAPIError(f'ожидалась размерность {profile.vector_size}, получена {len(vector)}; проверьте деплоймент')
     except (ValueError, EmbeddingAPIError) as exc:
         parser.exit(1, f'не удалось получить эмбеддинг: {exc}\n')
     print('подключение к api работает')

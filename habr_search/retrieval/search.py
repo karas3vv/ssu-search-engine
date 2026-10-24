@@ -1,5 +1,5 @@
-"""ищем статьи по смыслу запроса через gemma в mws и qdrant."""
-# поток поиска: запрос → инструкция gemma → вектор mws → статьи из qdrant
+"""ищем статьи по смыслу запроса через выбранную модель в mws и qdrant."""
+# поток поиска: запрос → подготовка по профилю → вектор mws → статьи из qdrant
 from __future__ import annotations
 
 import argparse
@@ -12,14 +12,16 @@ from pathlib import Path
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from habr_search.ingestion.chunking import DEFAULT_TOKENIZER, ChunkingConfig, load_tokenizer
-from habr_search.embeddings import DEFAULT_MODEL, DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
+from habr_search.ingestion.chunking import ChunkingConfig, load_tokenizer
+from habr_search.embeddings import DEFAULT_URL, EmbeddingConfig, EmbeddingsClient, read_api_key
 from habr_search.ingestion.index import VECTOR_SIZE, collection_name
-from habr_search.retrieval.spelling import DEFAULT_DICTIONARY, load_dictionary
+from habr_search.retrieval.spelling import load_dictionary
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import index_revision
 
-QUERY_INSTRUCTION: str = 'Given a web search query, retrieve relevant passages that answer the query.'
+from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+
+QUERY_INSTRUCTION: str = GEMMA.query_instruction or ''
 MAX_QUERY_TOKENS: int = 1024
 
 
@@ -39,14 +41,14 @@ class SearchResult:
     score: float  # оценка алгоритма поиска, а не вероятность правильного ответа
 
 
-def build_query(query: str, raw: bool = False) -> str:
-    """добавляем поисковую инструкцию gemma; документы индексируются без неё."""
+def build_query(query: str, raw: bool = False, profile: ModelProfile = GEMMA) -> str:
+    """gemma получает инструкцию, bge-m3 — обычный текст запроса."""
     query = query.strip()
     if not query:
         raise ValueError('поисковый запрос пуст')
-    if raw:
+    if raw or profile.query_instruction is None:
         return query
-    return f'<instruct>{QUERY_INSTRUCTION}\n<query>{query}'
+    return f'<instruct>{profile.query_instruction}\n<query>{query}'
 
 
 # проверяем, что нужная коллекция существует, совместима и содержит точки
@@ -102,14 +104,15 @@ class CliArgs(argparse.Namespace):
     query: str
     qdrant_url: str | None
     qdrant_path: Path | None
-    tokenizer_file: Path
+    tokenizer_file: Path | None
+    embedding_model: str
     top_k: int
     max_tokens: int
     overlap_tokens: int
     snippet_chars: int
     raw_query: bool
     spelling_mode: str
-    spelling_db: Path
+    spelling_db: Path | None
     min_score: float | None
 
 
@@ -120,7 +123,8 @@ def main() -> int:
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url', help='адрес сервера qdrant')
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного qdrant')
-    parser.add_argument('--tokenizer-file', type=Path, default=DEFAULT_TOKENIZER)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--top-k', type=int, default=5, help='сколько разных статей показать')
     parser.add_argument('--min-score', type=float, help='не показывать результаты ниже выбранного порога сходства')
     parser.add_argument('--max-tokens', type=int, default=1024, help='должно совпадать с настройкой индексатора')
@@ -129,25 +133,26 @@ def main() -> int:
     parser.add_argument('--raw-query', action='store_true', help='для сервера, который сам добавляет инструкцию gemma')
     parser.add_argument('--spelling-mode', choices=('off', 'suggest', 'apply'), default='off',
                         help='off: исходный запрос; suggest: показать варианты; apply: применить однозначные исправления')
-    parser.add_argument('--spelling-db', type=Path, default=DEFAULT_DICTIONARY, help='словарь из python -m habr_search.retrieval.spellcheck build')
+    parser.add_argument('--spelling-db', type=Path, help='словарь из python -m habr_search.retrieval.spellcheck build')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.top_k < 1 or args.snippet_chars < 1:
         parser.error('top-k и snippet-chars должны быть положительными')
     try:
         validate_min_score(args.min_score)
-        query = build_query(args.query, args.raw_query)
+        profile = get_profile(args.embedding_model)
+        query = build_query(args.query, args.raw_query, profile)
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if config.path is not None and not config.path.is_dir():
             raise ValueError('локальное хранилище не найдено; укажите адрес сервера через --qdrant-url')
         url = os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL)
-        deployment = os.environ.get('MWS_EMBEDDINGS_MODEL', DEFAULT_MODEL)
-        name = collection_name(url, deployment, chunking)
+        deployment = deployment_name(profile)
+        name = collection_name(url, deployment, chunking, profile)
         with closing(connect_store(config)) as store:
             # проверяем индекс до запроса ключа и обращения в платный api
-            validate_collection(store, name)
+            validate_collection(store, name, profile.vector_size)
             if args.spelling_mode != 'off':
-                dictionary = load_dictionary(args.spelling_db)
+                dictionary = load_dictionary(args.spelling_db or profile.dictionary_file)
                 dictionary.validate_context(name, store.count(name, exact=True).count, index_revision(store, name))
                 spelling = dictionary.suggest(args.query)
                 print(f'исходный запрос: {spelling.original}')
@@ -155,16 +160,16 @@ def main() -> int:
                     options = ', '.join(item.word for item in suggestion.candidates)
                     print(f'возможное исправление {suggestion.original}: {options}')
                 if args.spelling_mode == 'apply':
-                    query = build_query(spelling.corrected, args.raw_query)
+                    query = build_query(spelling.corrected, args.raw_query, profile)
                     print(f'запрос для поиска: {spelling.corrected}')
-            tokenizer = load_tokenizer(args.tokenizer_file)
+            tokenizer = load_tokenizer(args.tokenizer_file, profile)
             # длинный запрос отклоняем целиком, чтобы скрытое обрезание не меняло его смысл
-            if tokenizer.count(query) > MAX_QUERY_TOKENS:
-                raise ValueError(f'запрос вместе с инструкцией превышает {MAX_QUERY_TOKENS} токенов; сократите его')
+            if tokenizer.count(query) > profile.query_max_tokens:
+                raise ValueError(f'запрос вместе с инструкцией превышает {profile.query_max_tokens} токенов; сократите его')
             key = read_api_key()
             with closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))) as embeddings:
                 vector = embeddings.embed([query])[0]
-            results = search_articles(store, name, vector, args.top_k, min_score=args.min_score)
+            results = search_articles(store, name, vector, args.top_k, profile.vector_size, min_score=args.min_score)
         print(f'коллекция: {name}')
         print(f'найдено статей: {len(results)}')
         for number, result in enumerate(results, 1):
