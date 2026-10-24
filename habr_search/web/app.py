@@ -435,6 +435,8 @@ class CliArgs(argparse.Namespace):
     min_score: float | None
     candidate_limit: int
     rrf_k: float
+    dense_weight: float
+    lexical_weight: float
 
 
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
@@ -455,6 +457,8 @@ def main() -> int:
     parser.add_argument('--overlap-tokens', type=int, default=128)
     parser.add_argument('--candidate-limit', type=int, default=20, help='кандидатов каждого источника в гибриде')
     parser.add_argument('--rrf-k', type=float, default=60.0, help='сглаживание мест в гибриде')
+    parser.add_argument('--dense-weight', type=float, default=1.0, help='вклад bge-m3 в гибриде')
+    parser.add_argument('--lexical-weight', type=float, default=1.0, help='вклад tantivy в гибриде')
     parser.add_argument('--min-score', type=float, help='проверенный порог сходства; по умолчанию выключен')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not 1 <= args.port <= 65535 or not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -468,7 +472,7 @@ def main() -> int:
             uvicorn.run(create_app(lambda: TantivyService(args.tantivy_path, not args.without_spelling)),
                         host='127.0.0.1', port=args.port, log_level='warning', access_log=False)
             return 0
-        hybrid_config = HybridConfig(args.candidate_limit, args.rrf_k)
+        hybrid_config = HybridConfig(args.candidate_limit, args.rrf_k, args.dense_weight, args.lexical_weight)
         if args.engine == 'hybrid' and (args.min_score is not None or args.raw_query or args.spelling_db is not None):
             raise ValueError('гибрид не использует min-score, raw-query и spelling-db; словарь берётся из tantivy')
         if args.engine == 'hybrid' and args.candidate_limit < 20:

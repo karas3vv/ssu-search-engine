@@ -20,11 +20,16 @@ class HybridConfig:
     candidate_limit: int = 20  # каждый источник отдаёт одинаковое число кандидатов
     rrf_k: float = 60.0  # сглаживаем разницу между соседними местами
 
+    dense_weight: float = 1.0  # вклад списка bge-m3
+    lexical_weight: float = 1.0  # вклад списка tantivy
+
     def __post_init__(self) -> None:
         if not 1 <= self.candidate_limit <= 100:
             raise ValueError('candidate-limit должен быть от 1 до 100')
         if not math.isfinite(self.rrf_k) or self.rrf_k <= 0:
             raise ValueError('rrf-k должен быть положительным конечным числом')
+        if any(not math.isfinite(weight) or weight <= 0 for weight in (self.dense_weight, self.lexical_weight)):
+            raise ValueError('веса поисков должны быть положительными конечными числами')
 
 
 @dataclass(frozen=True)
@@ -48,7 +53,9 @@ def fuse_rankings(dense: Sequence[int], lexical: Sequence[int], top_k: int,
     found: list[FusedRank] = []
     for article_id in dense_ranks.keys() | lexical_ranks.keys():
         dense_rank, lexical_rank = dense_ranks.get(article_id), lexical_ranks.get(article_id)
-        score = sum(1.0 / (config.rrf_k + rank) for rank in (dense_rank, lexical_rank) if rank is not None)
+        score = sum(weight / (config.rrf_k + rank)
+                    for rank, weight in ((dense_rank, config.dense_weight), (lexical_rank, config.lexical_weight))
+                    if rank is not None)
         found.append(FusedRank(article_id, score, dense_rank, lexical_rank))
     # при равных оценках порядок воспроизводится независимо от порядка set
     absent = config.candidate_limit + 1

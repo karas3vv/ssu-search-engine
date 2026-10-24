@@ -157,7 +157,7 @@ class HybridTests(unittest.TestCase):
                          'python,exact,Python,1\nphone,exact,телефония,2\n')
         first, second = self.root / 'first.csv', self.root / 'second.csv'
         common = ['evaluate', '--qdrant-path', str(self.store_path), '--tantivy-path', str(self.local_path),
-                  '--queries', str(cases)]
+                  '--queries', str(cases), '--dense-weight', '2']
         failing = FakeEmbeddings(1024, fail_on_call=2)
         with patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
                 patch('sys.argv', [*common, '--output', str(first)]), \

@@ -27,12 +27,13 @@ from habr_search.retrieval.hybrid import HybridConfig, HybridRetriever, fuse_ran
 from habr_search.retrieval.tantivy_index import DEFAULT_INDEX, TantivySearch, literal_query
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 
-REPORT_COLUMNS: tuple[str, ...] = (
+LEGACY_REPORT_COLUMNS: tuple[str, ...] = (
     'format_version', 'collection', 'qdrant_revision', 'tantivy_revision', 'collection_points',
     'query_set_sha256', 'top_k', 'candidate_limit', 'rrf_k', 'started_at', 'query_id',
     'category', 'query', 'relevant_article_ids', 'dense_article_ids', 'lexical_article_ids',
     'hybrid_article_ids', 'elapsed_ms', 'dense_elapsed_ms', 'lexical_elapsed_ms',
 )
+REPORT_COLUMNS: tuple[str, ...] = (*LEGACY_REPORT_COLUMNS[:9], 'dense_weight', 'lexical_weight', *LEGACY_REPORT_COLUMNS[9:])
 
 
 @dataclass(frozen=True)
@@ -47,8 +48,9 @@ class HybridContext:
 
     def cells(self) -> list[str]:
         """эти настройки должны точно совпасть при продолжении отчёта."""
-        return ['1', self.collection, self.qdrant_revision, self.tantivy_revision, str(self.points),
-                self.query_hash, str(self.top_k), str(self.config.candidate_limit), str(self.config.rrf_k)]
+        return ['2', self.collection, self.qdrant_revision, self.tantivy_revision, str(self.points),
+                self.query_hash, str(self.top_k), str(self.config.candidate_limit), str(float(self.config.rrf_k)),
+                str(float(self.config.dense_weight)), str(float(self.config.lexical_weight))]
 
 
 @dataclass(frozen=True)
@@ -88,26 +90,63 @@ def load_saved(path: Path, cases: Sequence[EvaluationQuery], context: HybridCont
     saved: dict[str, HybridEvaluation] = {}
     with path.open(encoding='utf-8-sig', newline='') as stream:
         reader = csv.reader(stream, strict=True)
-        if tuple(next(reader, list[str]())) != REPORT_COLUMNS:
+        header = tuple(next(reader, list[str]()))
+        if header not in (LEGACY_REPORT_COLUMNS, REPORT_COLUMNS):
             raise ValueError('resume требует отчёт evaluate_hybrid с кандидатами обоих поисков')
+        expected_context = context.cells()
+        if header == LEGACY_REPORT_COLUMNS:
+            if context.config.dense_weight != 1.0 or context.config.lexical_weight != 1.0:
+                raise ValueError('старый отчёт имеет веса 1:1; для новых весов используйте офлайн-сравнение')
+            expected_context = ['1', *expected_context[1:9]]
+        prefix_size = len(expected_context)
         for row in reader:
-            if len(row) != len(REPORT_COLUMNS) or row[:9] != context.cells():
+            if len(row) != len(header):
+                raise ValueError('повреждено число столбцов resume')
+            saved_context = row[:prefix_size]
+            # записи 10 и 10.0 обозначают одинаковый числовой параметр
+            for position in range(8, prefix_size):
+                saved_context[position] = str(float(saved_context[position]))
+            if saved_context != expected_context:
                 raise ValueError('настройки или версии индексов в resume не совпали')
-            case = by_id.get(row[10])
-            if case is None or case.query_id in saved or row[11:14] != [case.category, case.query, ';'.join(map(str, case.relevant_ids))]:
+            values = dict(zip(header, row))
+            case = by_id.get(values['query_id'])
+            if (case is None or case.query_id in saved or values['category'] != case.category
+                    or values['query'] != case.query or values['relevant_article_ids'] != ';'.join(map(str, case.relevant_ids))):
                 raise ValueError('запрос resume изменён, неизвестен или повторяется')
-            datetime.fromisoformat(row[9])
-            lists = [tuple(map(int, cell.split(';'))) if cell else () for cell in row[14:17]]
+            datetime.fromisoformat(values['started_at'])
+            lists = [tuple(map(int, values[key].split(';'))) if values[key] else ()
+                     for key in ('dense_article_ids', 'lexical_article_ids', 'hybrid_article_ids')]
             dense, lexical, hybrid = lists
-            # функция объединения также проверяет уникальность, знаки id и глубину списков
+            # проверяем выдачу именно с исходными весами, а не с параметрами нового эксперимента
             expected = tuple(item.article_id for item in fuse_rankings(dense, lexical, context.top_k, context.config))
             if hybrid != expected:
                 raise ValueError('выдача resume не соответствует сохранённым кандидатам')
-            elapsed, dense_ms, lexical_ms = map(float, row[17:20])
+            elapsed, dense_ms, lexical_ms = (float(values[key]) for key in ('elapsed_ms', 'dense_elapsed_ms', 'lexical_elapsed_ms'))
             if any(not math.isfinite(value) or value < 0 for value in (elapsed, dense_ms, lexical_ms)):
                 raise ValueError('в resume повреждено время запроса')
-            saved[case.query_id] = HybridEvaluation(case, dense, lexical, hybrid, elapsed, dense_ms, lexical_ms, row[9])
+            saved[case.query_id] = HybridEvaluation(case, dense, lexical, hybrid, elapsed, dense_ms, lexical_ms, values['started_at'])
+
     return saved
+
+
+
+def read_saved_report(path: Path, cases: Sequence[EvaluationQuery]) -> tuple[HybridContext, dict[str, HybridEvaluation]]:
+    """читаем метаданные и проверяем весь отчёт без соединений с индексами и моделью."""
+    with path.open(encoding='utf-8-sig', newline='') as stream:
+        reader = csv.reader(stream, strict=True)
+        header = tuple(next(reader, list[str]()))
+        row = next(reader, None)
+    if header not in (LEGACY_REPORT_COLUMNS, REPORT_COLUMNS) or row is None or len(row) != len(header):
+        raise ValueError('нужен непустой отчёт evaluate_hybrid')
+    values = dict(zip(header, row))
+    config = HybridConfig(int(values['candidate_limit']), float(values['rrf_k']),
+                          float(values.get('dense_weight', '1.0')), float(values.get('lexical_weight', '1.0')))
+    context = HybridContext(values['collection'], values['qdrant_revision'], values['tantivy_revision'],
+                            int(values['collection_points']), values['query_set_sha256'], int(values['top_k']), config)
+    if (context.query_hash != query_set_hash(cases) or context.points < 1
+            or not 1 <= context.top_k <= min(20, config.candidate_limit)):
+        raise ValueError('набор запросов или метаданные отчёта не совпали')
+    return context, load_saved(path, cases, context)
 
 
 def evaluate_cases(prepared: Sequence[tuple[EvaluationQuery, str]], retriever: HybridRetriever,
@@ -138,6 +177,8 @@ class CliArgs(argparse.Namespace):
     tokenizer_file: Path | None
     candidate_limit: int
     rrf_k: float
+    dense_weight: float
+    lexical_weight: float
     top_k: int
     timeout: float
     max_tokens: int
@@ -158,6 +199,8 @@ def main() -> int:
     parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--candidate-limit', type=int, default=20)
     parser.add_argument('--rrf-k', type=float, default=60.0)
+    parser.add_argument('--dense-weight', type=float, default=1.0)
+    parser.add_argument('--lexical-weight', type=float, default=1.0)
     parser.add_argument('--top-k', type=int, default=5)
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
@@ -165,7 +208,7 @@ def main() -> int:
     parser.add_argument('--check-only', action='store_true', help='проверить источники без mws и создания отчёта')
     args = parser.parse_args(namespace=CliArgs())
     try:
-        config = HybridConfig(args.candidate_limit, args.rrf_k)
+        config = HybridConfig(args.candidate_limit, args.rrf_k, args.dense_weight, args.lexical_weight)
         if not 1 <= args.top_k <= min(20, config.candidate_limit):
             raise ValueError('top-k должен быть от 1 до 20 и не больше candidate-limit')
         if not math.isfinite(args.timeout) or args.timeout <= 0:
