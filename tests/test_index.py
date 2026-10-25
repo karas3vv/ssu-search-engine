@@ -112,7 +112,7 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(backend.calls, 1)
             self.assertEqual(before, source.read_bytes())
             with closing(QdrantClient(path=str(storage))) as reopened:
-                name = collection_name('https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings', 'parser', ChunkingConfig())
+                name = collection_name('https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings', 'bge-m3', ChunkingConfig())
                 self.assertEqual(reopened.count(name, exact=True).count, 1)
 
     # сохранённые точки доступны после перезапуска и не отправляются в модель повторно

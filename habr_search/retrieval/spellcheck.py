@@ -15,7 +15,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 
 from habr_search.ingestion.chunking import ChunkingConfig
 from habr_search.embeddings import DEFAULT_URL
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, deployment_name, get_profile
 from habr_search.evaluation.evaluate import QUERY_COLUMNS, EvaluationQuery, load_queries
 from habr_search.ingestion.index import collection_name
 from habr_search.retrieval.spelling import (
@@ -126,7 +126,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest='command', required=True)
     build = commands.add_parser('build', help='собрать словарь из существующей коллекции')
     build.add_argument('--dictionary', type=Path)
-    build.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    build.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     location = build.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)

@@ -19,7 +19,7 @@ from habr_search.retrieval.spelling import load_dictionary
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import index_revision
 
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
 
 QUERY_INSTRUCTION: str = GEMMA.query_instruction or ''
 MAX_QUERY_TOKENS: int = 1024
@@ -41,7 +41,7 @@ class SearchResult:
     score: float  # оценка алгоритма поиска, а не вероятность правильного ответа
 
 
-def build_query(query: str, raw: bool = False, profile: ModelProfile = GEMMA) -> str:
+def build_query(query: str, raw: bool = False, profile: ModelProfile = DEFAULT_PROFILE) -> str:
     """gemma получает инструкцию, bge-m3 — обычный текст запроса."""
     query = query.strip()
     if not query:
@@ -123,7 +123,7 @@ def main() -> int:
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url', help='адрес сервера qdrant')
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного qdrant')
-    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--top-k', type=int, default=5, help='сколько разных статей показать')
     parser.add_argument('--min-score', type=float, help='не показывать результаты ниже выбранного порога сходства')

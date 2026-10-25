@@ -34,7 +34,7 @@ from habr_search.index_version import index_revision
 from habr_search.paths import DATA_DIR
 from habr_search.retrieval.hybrid import HybridConfig, HybridRetriever
 from habr_search.retrieval.tantivy_index import literal_query
-from habr_search.model_profiles import BGE_M3, GEMMA, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE, ModelProfile, deployment_name, get_profile
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -110,7 +110,7 @@ class SearchService:
     def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
                  embeddings: EmbeddingProvider, dictionary: SpellingDictionary | None,
                  raw_query: bool = False, min_score: float | None = None,
-                 profile: ModelProfile = GEMMA) -> None:
+                 profile: ModelProfile = DEFAULT_PROFILE) -> None:
         validate_min_score(min_score)
         validate_collection(store, name, profile.vector_size)
         points = store.count(name, exact=True).count
@@ -311,7 +311,7 @@ class WebConfig:
     chunking: ChunkingConfig = ChunkingConfig()
     raw_query: bool = False
     min_score: float | None = None  # выбранный порог задаёт сервер, а не браузер
-    profile: ModelProfile = GEMMA
+    profile: ModelProfile = DEFAULT_PROFILE
 
 
 def connect_service(config: WebConfig) -> SearchService:
@@ -442,7 +442,7 @@ class CliArgs(argparse.Namespace):
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['gemma', 'bge-m3', 'tantivy', 'hybrid'], default='gemma')
+    parser.add_argument('--engine', choices=['bge-m3', 'tantivy', 'hybrid', 'gemma'], default='bge-m3')
     parser.add_argument('--tantivy-path', type=Path, default=DATA_DIR / 'tantivy')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')

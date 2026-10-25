@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from habr_search.paths import DATA_DIR
+from habr_search.model_profiles import DEFAULT_PROFILE
 from habr_search.index_version import UNVERSIONED
 
-DEFAULT_DICTIONARY: Path = DATA_DIR / 'spelling.sqlite3'
+DEFAULT_DICTIONARY: Path = DEFAULT_PROFILE.dictionary_file
 DICTIONARY_VERSION: str = '2'
 WORD_PATTERN: re.Pattern[str] = re.compile(r'[a-zA-Zа-яА-ЯёЁ]+')
 MAX_WORD_LENGTH: int = 40

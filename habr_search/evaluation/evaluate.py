@@ -28,7 +28,7 @@ from habr_search.retrieval.search import (
 )
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import UNVERSIONED, index_revision
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
 
 from habr_search.paths import PROJECT_ROOT as ROOT
 
@@ -189,7 +189,7 @@ def print_summary(results: Sequence[QueryEvaluation], top_k: int, label: str = '
 # добавляем инструкцию модели и проверяем длину всех ещё не выполненных запросов
 def prepare_queries(
     cases: Sequence[EvaluationQuery], tokenizer: TextTokenizer, raw_query: bool = False,
-    profile: ModelProfile = GEMMA,
+    profile: ModelProfile = DEFAULT_PROFILE,
 ) -> list[tuple[EvaluationQuery, str]]:
     prepared: list[tuple[EvaluationQuery, str]] = []
     for case in cases:
@@ -359,7 +359,7 @@ def main() -> int:
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
     location.add_argument('--qdrant-path', type=Path)
-    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)

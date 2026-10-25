@@ -21,7 +21,7 @@ from habr_search.embeddings import DEFAULT_URL, EmbeddingConfig, main as probe_m
 from habr_search.evaluation.evaluate import EvaluationQuery, main as evaluate_main, prepare_queries
 from habr_search.ingestion.chunking import ChunkingConfig, ModelTokenizer, chunk_article
 from habr_search.ingestion.index import collection_name, ensure_collection, index_chunks, main as index_main
-from habr_search.model_profiles import BGE_M3, GEMMA
+from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE, GEMMA
 from habr_search.retrieval.search import build_query, main as search_main, validate_collection
 from habr_search.retrieval.spellcheck import main as spellcheck_main
 from habr_search.web.app import SearchService, create_app, main as web_main
@@ -30,14 +30,20 @@ from tests.test_evaluate import FakeEmbeddings
 
 
 class ModelProfileTests(unittest.TestCase):
+    def test_default_profile_uses_existing_m3_collection_and_plain_queries(self) -> None:
+        self.assertEqual(DEFAULT_PROFILE, BGE_M3)
+        self.assertEqual(EmbeddingConfig('test').model, 'bge-m3')
+        self.assertEqual(collection_name(DEFAULT_URL, 'bge-m3', ChunkingConfig()), 'habr_bge_m3_4e2f56730009')
+        self.assertEqual(build_query('  документы  '), 'документы')
+
     def test_gemma_collection_and_chunk_ids_are_preserved(self) -> None:
-        self.assertEqual(collection_name(DEFAULT_URL, 'parser', ChunkingConfig()), 'habr_gemma2_ddb30cefb72f')
+        self.assertEqual(collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), GEMMA), 'habr_gemma2_ddb30cefb72f')
         self.assertTrue(collection_name(DEFAULT_URL, 'bge-m3', ChunkingConfig(), BGE_M3).startswith('habr_bge_m3_'))
         # один и тот же деплоймент также не позволяет смешать разные модели
         self.assertNotEqual(collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), BGE_M3),
-                            collection_name(DEFAULT_URL, 'parser', ChunkingConfig()))
+                            collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), GEMMA))
         doc = article('полный текст статьи')
-        legacy = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
+        legacy = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
         explicit = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
         changed = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), BGE_M3))
         self.assertEqual(legacy, explicit)
@@ -59,7 +65,8 @@ class ModelProfileTests(unittest.TestCase):
         self.assertEqual(build_query('  документы  ', profile=BGE_M3), 'документы')
         case = EvaluationQuery('m3', 'exact', 'документы', (1,))
         self.assertEqual(prepare_queries([case], CharacterTokenizer(), profile=BGE_M3)[0][1], 'документы')
-        self.assertIn('<instruct>', build_query('документы'))
+        self.assertEqual(build_query('документы'), 'документы')
+        self.assertIn('<instruct>', build_query('документы', profile=GEMMA))
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(EmbeddingConfig.from_env('test', BGE_M3).model, 'bge-m3')
 
@@ -80,7 +87,7 @@ class ModelProfileTests(unittest.TestCase):
             if payload is not None:
                 self.assertEqual(payload['model'], 'BAAI/bge-m3')
             with self.assertRaises(ValueError):
-                validate_collection(store, 'm3')
+                validate_collection(store, 'm3', GEMMA.vector_size)
             service = SearchService(store, 'm3', CharacterTokenizer(), embeddings, None, profile=BGE_M3)
             with TestClient(create_app(lambda: service)) as client:
                 result = client.post('/api/search', json={'query': 'документы'})
@@ -107,7 +114,7 @@ class ModelProfileTests(unittest.TestCase):
                 connection.execute('CREATE TABLE articles (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
                 connection.execute('INSERT INTO articles VALUES (?, ?)', (doc.id, json.dumps({
                     'id': doc.id, 'url': doc.url, 'title': doc.title, 'text': doc.text})))
-            common = ['--embedding-model', 'bge-m3', '--qdrant-path', str(database)]
+            common = ['--qdrant-path', str(database)]
             provider = FakeEmbeddings(BGE_M3.vector_size)
             with patch('sys.argv', ['index', *common, '--source', str(source)]), \
                     patch('habr_search.ingestion.index.load_tokenizer', return_value=CharacterTokenizer()), \
@@ -131,7 +138,7 @@ class ModelProfileTests(unittest.TestCase):
                     patch('habr_search.retrieval.search.EmbeddingsClient', return_value=search_provider):
                 self.assertEqual(search_main(), 0)
                 self.assertEqual(search_provider.calls, [['документы']])
-            with patch('sys.argv', ['probe', '--embedding-model', 'bge-m3']), \
+            with patch('sys.argv', ['probe']), \
                     patch('habr_search.embeddings.read_api_key', return_value='test'), \
                     patch('habr_search.embeddings.EmbeddingsClient', return_value=FakeEmbeddings(1024)) as constructor:
                 self.assertEqual(probe_main(), 0)
@@ -145,7 +152,7 @@ class ModelProfileTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json()['results'][0]['article_id'], 1)
 
-            with patch('sys.argv', ['web', '--engine', 'bge-m3', '--qdrant-path', str(database),
+            with patch('sys.argv', ['web', '--qdrant-path', str(database),
                                     '--spelling-db', str(dictionary)]), \
                     patch('habr_search.web.app.read_api_key', return_value='test'), \
                     patch('habr_search.web.app.load_tokenizer', return_value=CharacterTokenizer()), \

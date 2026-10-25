@@ -212,8 +212,8 @@ class WebTests(unittest.TestCase):
                 self.assertIsNone(selected['suggested_query'])
                 self.assertFalse(selected['corrected'])
                 self.assertEqual(len(embeddings.calls), 2)
-                self.assertTrue(embeddings.calls[0][0].endswith('<query>pyhton'))
-                self.assertTrue(embeddings.calls[1][0].endswith('<query>python'))
+                self.assertEqual(embeddings.calls[0][0], 'pyhton')
+                self.assertEqual(embeddings.calls[1][0], 'python')
 
     # даже ложный вариант для редкого названия не меняет исходный поисковый запрос
     def test_rare_technology_name_is_only_suggested_and_never_silently_replaced(self) -> None:
@@ -229,7 +229,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(result['suggested_query'], 'Стора без Спринга')
                 self.assertFalse(result['corrected'])
                 self.assertEqual(len(embeddings.calls), 1)
-                self.assertTrue(embeddings.calls[0][0].endswith('<query>Ктора без Спринга'))
+                self.assertEqual(embeddings.calls[0][0], 'Ктора без Спринга')
 
     # при явном расхождении словаря и индекса доступен поиск исходной фразы без подсказок
     def test_changed_point_count_disables_suggestions_for_original_search(self) -> None:

@@ -55,7 +55,7 @@ class EmbeddingsTests(unittest.TestCase):
                 {'data': [{'index': 0, 'embedding': [0.2, 0.3]}]}
             )) as post:
                 self.assertEqual(client.embed(['тестовый текст']), [[0.2, 0.3]])
-                self.assertEqual(post.call_args.kwargs['json'], {'model': 'parser', 'input': ['тестовый текст']})
+                self.assertEqual(post.call_args.kwargs['json'], {'model': 'bge-m3', 'input': ['тестовый текст']})
                 self.assertFalse(post.call_args.kwargs['allow_redirects'])
         finally:
             client.close()

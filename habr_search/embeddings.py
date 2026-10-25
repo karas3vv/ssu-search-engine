@@ -14,10 +14,10 @@ from urllib.parse import urlsplit
 
 import requests
 
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
 
 DEFAULT_URL: str = 'https://gpt.mwsapis.ru/projects/habr-parser/openai/v1/embeddings'
-DEFAULT_MODEL: str = 'parser'  # имя деплоймента в mws, а не имя модели на hugging face
+DEFAULT_MODEL: str = DEFAULT_PROFILE.deployment  # имя деплоймента в mws, а не имя модели на hugging face
 
 
 class EmbeddingAPIError(RuntimeError):
@@ -47,7 +47,7 @@ class EmbeddingConfig:
 
     # берём адрес и имя деплоймента из окружения, используя переданный ключ
     @classmethod
-    def from_env(cls, api_key: str, profile: ModelProfile = GEMMA) -> EmbeddingConfig:
+    def from_env(cls, api_key: str, profile: ModelProfile = DEFAULT_PROFILE) -> EmbeddingConfig:
         return cls(
             api_key=api_key,
             url=os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
@@ -192,7 +192,7 @@ def read_api_key() -> str:
 # проверяем один текст и показываем размерность полученного вектора
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     parser.add_argument('--text', default='Привет, как дела?', help='один текст для проверки api')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if not args.text.strip():

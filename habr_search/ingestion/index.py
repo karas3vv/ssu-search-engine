@@ -28,9 +28,9 @@ from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, iter
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import invalidate_index
 
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
 
-VECTOR_SIZE: int = GEMMA.vector_size  # размерность, которую вернул проверенный деплоймент parser
+VECTOR_SIZE: int = DEFAULT_PROFILE.vector_size  # размерность основного деплоймента bge-m3
 
 
 # интерфейс позволяет проверять запись в qdrant без настоящих запросов в mws
@@ -47,7 +47,7 @@ class IndexStats:
 
 
 # вычисляем имя коллекции из настроек модели и разбиения
-def collection_name(url: str, deployment: str, config: ChunkingConfig, profile: ModelProfile = GEMMA) -> str:
+def collection_name(url: str, deployment: str, config: ChunkingConfig, profile: ModelProfile = DEFAULT_PROFILE) -> str:
     # другой деплоймент или настройки разбиения получают отдельную коллекцию
     # настройки входят в отпечаток, чтобы случайно не смешать несовместимые векторы
     settings = {
@@ -83,7 +83,7 @@ def ensure_collection(
 def index_chunks(
     chunks: list[ArticleChunk], text_hash: str, store: QdrantClient,
     name: str, embeddings: EmbeddingProvider, batch_size: int = 4,
-    vector_size: int | None = None, *, profile: ModelProfile = GEMMA,
+    vector_size: int | None = None, *, profile: ModelProfile = DEFAULT_PROFILE,
 ) -> IndexStats:
     """сохраняем одну статью пакетами; повторный запуск пропускает готовые точки."""
     vector_size = profile.vector_size if vector_size is None else vector_size
@@ -158,7 +158,7 @@ class CliArgs(argparse.Namespace):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     parser.add_argument('--tokenizer-file', type=Path)
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-path', type=Path, help='папка встроенного режима')

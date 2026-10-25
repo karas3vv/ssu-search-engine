@@ -11,6 +11,7 @@ from tokenizers.models import WordLevel
 
 from habr_search.ingestion.chunking import ChunkingConfig, ModelTokenizer, chunk_article
 from habr_search.ingestion.prepare import PreparedArticle
+from habr_search.model_profiles import GEMMA
 
 
 # вместо модели используем прозрачный счётчик: один символ равен одному токену
@@ -95,7 +96,7 @@ class ChunkingTests(unittest.TestCase):
     # для gemma используется её текущий лимит и отсутствует префикс старой модели e5
     def test_gemma_chunks_can_exceed_old_e5_limit(self) -> None:
         doc = article('длинный текст ' * 200)
-        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
+        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
         self.assertTrue(any(chunk.token_count > 512 for chunk in chunks))
         self.assertTrue(all(chunk.token_count <= 1024 for chunk in chunks))
         self.assertTrue(all(not chunk.embedding_text.startswith('passage: ') for chunk in chunks))
@@ -108,7 +109,7 @@ class ChunkingTests(unittest.TestCase):
                 {'<unk>': 0, '<eos>': 1, '<bos>': 2, 'текст': 3}, unk_token='<unk>',
             ))
             tokenizer.save(str(path))
-            actual = ModelTokenizer(path)
+            actual = ModelTokenizer(path, GEMMA)
             self.assertEqual(actual.tokenizer.encode('текст').ids, [2, 3, 1])
             self.assertEqual(actual.count('текст'), 3)
 
@@ -118,7 +119,7 @@ class ChunkingTests(unittest.TestCase):
             path = Path(folder) / 'tokenizer.json'
             tokenizer = Tokenizer(WordLevel({'[UNK]': 0}, unk_token='[UNK]'))
             tokenizer.save(str(path))
-            with self.assertRaisesRegex(ValueError, 'bge-multilingual-gemma2'):
+            with self.assertRaisesRegex(ValueError, 'bge-m3'):
                 ModelTokenizer(path)
 
     # слишком большой вход и недопустимое перекрытие отклоняются

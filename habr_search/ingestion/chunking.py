@@ -21,14 +21,14 @@ from tokenizers.processors import TemplateProcessing
 
 from habr_search.ingestion.prepare import DEFAULT_SOURCE, PreparationStats, PreparedArticle, iter_prepared_articles
 
-from habr_search.model_profiles import GEMMA, PROFILE_NAMES, ModelProfile, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, ModelProfile, get_profile
 
 # фиксируем версию, чтобы одинаковые настройки всегда давали одинаковые фрагменты
-MODEL_ID: str = GEMMA.model_id
-MODEL_REVISION: str = GEMMA.revision
+MODEL_ID: str = DEFAULT_PROFILE.model_id
+MODEL_REVISION: str = DEFAULT_PROFILE.revision
 MODEL_MAX_TOKENS: int = 8192  # предел модели; у удалённого деплоймента лимит может быть ниже
 CHUNKING_VERSION: str = '2'
-DEFAULT_TOKENIZER: Path = GEMMA.tokenizer_file
+DEFAULT_TOKENIZER: Path = DEFAULT_PROFILE.tokenizer_file
 
 
 # настройки относятся ко всему входу модели: заголовку, фрагменту и специальным токенам
@@ -73,7 +73,7 @@ class TextTokenizer(Protocol):
 # обёртка над токенизатором выбранной модели; веса здесь не загружаются
 class ModelTokenizer:
     # проверяем формат токенизатора и включаем специальные токены профиля
-    def __init__(self, path: Path, profile: ModelProfile = GEMMA) -> None:
+    def __init__(self, path: Path, profile: ModelProfile = DEFAULT_PROFILE) -> None:
         self.tokenizer: Tokenizer = Tokenizer.from_file(str(path))
         # чужой файл отклоняется, даже если он лежит в ожидаемой папке
         if (self.tokenizer.token_to_id(profile.bos_token) != profile.bos_id
@@ -96,7 +96,7 @@ class ModelTokenizer:
         return len(self.tokenizer.encode(text, add_special_tokens=True).ids)
 
 
-def load_tokenizer(path: Path | None = None, profile: ModelProfile = GEMMA) -> ModelTokenizer:
+def load_tokenizer(path: Path | None = None, profile: ModelProfile = DEFAULT_PROFILE) -> ModelTokenizer:
     """скачиваем только токенизатор при первом запуске и затем используем локальный файл."""
     path = path if path is not None else profile.tokenizer_file
     if path.exists():
@@ -133,7 +133,7 @@ def embedding_header(title: str, tokenizer: TextTokenizer, max_tokens: int) -> s
 
 def chunk_article(
     article: PreparedArticle, tokenizer: TextTokenizer, config: ChunkingConfig,
-    profile: ModelProfile = GEMMA,
+    profile: ModelProfile = DEFAULT_PROFILE,
 ) -> Iterator[ArticleChunk]:
     """разбиваем текст по токенам, стараясь завершать фрагменты на переносах строк."""
     offsets = tokenizer.offsets(article.text)
@@ -204,7 +204,7 @@ class CliArgs(argparse.Namespace):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='база исходных статей')
-    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=GEMMA.name)
+    parser.add_argument('--embedding-model', choices=PROFILE_NAMES, default=DEFAULT_PROFILE.name)
     parser.add_argument('--tokenizer-file', type=Path, help='путь к токенизатору выбранной модели')
     parser.add_argument('--limit', type=int, default=5, help='сколько статей проверить')
     parser.add_argument('--max-tokens', type=int, default=1024, help='лимит входа модели вместе с заголовком')

@@ -43,6 +43,9 @@ BGE_M3: ModelProfile = ModelProfile(
     'bge-m3', 'BAAI/bge-m3', '5617a9f61b028005a4858fdac845db406aefb181',
     1024, 'bge-m3', '<s>', 0, '</s>', 2, None,
 )
+# основной профиль выбран по независимой проверке качества и скорости
+DEFAULT_PROFILE: ModelProfile = BGE_M3
+
 PROFILE_NAMES: tuple[str, ...] = ('gemma2', 'bge-m3')
 
 
