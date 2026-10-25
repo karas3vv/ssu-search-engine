@@ -34,7 +34,7 @@ def main() -> int:
         output = args.output or DATA_DIR / 'evaluation' / datetime.now(timezone.utc).strftime('tantivy-%Y%m%d-%H%M%S-%f.csv')
         output.parent.mkdir(parents=True, exist_ok=True)
         results: list[QueryEvaluation] = []
-        # отдельный формат исключает смешивание bm25 с косинусными оценками gemma
+        # отдельный формат исключает смешивание bm25 с косинусными оценками модели
         with output.open('x', encoding='utf-8', newline='') as stream:
             writer = csv.writer(stream)
             writer.writerow(['engine', 'index_revision', 'query_set_sha256', 'articles', 'top_k',

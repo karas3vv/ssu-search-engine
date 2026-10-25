@@ -19,9 +19,8 @@ from habr_search.retrieval.spelling import load_dictionary
 from habr_search.vector_store import connect_store, resolve_qdrant_config
 from habr_search.index_version import index_revision
 
-from habr_search.model_profiles import DEFAULT_PROFILE, GEMMA, PROFILE_NAMES, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import DEFAULT_PROFILE, PROFILE_NAMES, deployment_name, get_profile
 
-QUERY_INSTRUCTION: str = GEMMA.query_instruction or ''
 MAX_QUERY_TOKENS: int = 1024
 
 
@@ -41,14 +40,12 @@ class SearchResult:
     score: float  # оценка алгоритма поиска, а не вероятность правильного ответа
 
 
-def build_query(query: str, raw: bool = False, profile: ModelProfile = DEFAULT_PROFILE) -> str:
-    """gemma получает инструкцию, bge-m3 — обычный текст запроса."""
+def build_query(query: str) -> str:
+    """передаём bge-m3 обычный текст без служебных префиксов."""
     query = query.strip()
     if not query:
         raise ValueError('поисковый запрос пуст')
-    if raw or profile.query_instruction is None:
-        return query
-    return f'<instruct>{profile.query_instruction}\n<query>{query}'
+    return query
 
 
 # проверяем, что нужная коллекция существует, совместима и содержит точки
@@ -110,7 +107,6 @@ class CliArgs(argparse.Namespace):
     max_tokens: int
     overlap_tokens: int
     snippet_chars: int
-    raw_query: bool
     spelling_mode: str
     spelling_db: Path | None
     min_score: float | None
@@ -130,7 +126,6 @@ def main() -> int:
     parser.add_argument('--max-tokens', type=int, default=1024, help='должно совпадать с настройкой индексатора')
     parser.add_argument('--overlap-tokens', type=int, default=128, help='должно совпадать с настройкой индексатора')
     parser.add_argument('--snippet-chars', type=int, default=400, help='длина отрывка в выводе')
-    parser.add_argument('--raw-query', action='store_true', help='для сервера, который сам добавляет инструкцию gemma')
     parser.add_argument('--spelling-mode', choices=('off', 'suggest', 'apply'), default='off',
                         help='off: исходный запрос; suggest: показать варианты; apply: применить однозначные исправления')
     parser.add_argument('--spelling-db', type=Path, help='словарь из python -m habr_search.retrieval.spellcheck build')
@@ -140,7 +135,7 @@ def main() -> int:
     try:
         validate_min_score(args.min_score)
         profile = get_profile(args.embedding_model)
-        query = build_query(args.query, args.raw_query, profile)
+        query = build_query(args.query)
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         config = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if config.path is not None and not config.path.is_dir():
@@ -160,12 +155,12 @@ def main() -> int:
                     options = ', '.join(item.word for item in suggestion.candidates)
                     print(f'возможное исправление {suggestion.original}: {options}')
                 if args.spelling_mode == 'apply':
-                    query = build_query(spelling.corrected, args.raw_query, profile)
+                    query = build_query(spelling.corrected)
                     print(f'запрос для поиска: {spelling.corrected}')
             tokenizer = load_tokenizer(args.tokenizer_file, profile)
             # длинный запрос отклоняем целиком, чтобы скрытое обрезание не меняло его смысл
             if tokenizer.count(query) > profile.query_max_tokens:
-                raise ValueError(f'запрос вместе с инструкцией превышает {profile.query_max_tokens} токенов; сократите его')
+                raise ValueError(f'запрос превышает {profile.query_max_tokens} токенов; сократите его')
             key = read_api_key()
             with closing(EmbeddingsClient(EmbeddingConfig(key, url, deployment))) as embeddings:
                 vector = embeddings.embed([query])[0]

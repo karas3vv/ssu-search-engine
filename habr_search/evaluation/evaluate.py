@@ -85,7 +85,7 @@ class ReportContext:
     collection: str  # имя коллекции с фрагментами
     collection_points: int  # число точек во время оценки
     query_set_sha256: str  # отпечаток выбранных запросов и разметки
-    raw_query: bool  # передаём запрос без добавления инструкции на стороне клиента
+    raw_query: bool  # поле старого формата отчётов; новые проверки всегда записывают false
     top_k: int  # сколько первых статей учитывается в метриках
     index_revision: str = UNVERSIONED  # версия содержимого, а не только число точек
     min_score: float | None = None  # порог также должен совпасть при продолжении отчёта
@@ -186,16 +186,16 @@ def print_summary(results: Sequence[QueryEvaluation], top_k: int, label: str = '
         print(f'{prefix}время запроса: медиана {median(times):.0f} мс; p95 {p95:.0f} мс')
 
 
-# добавляем инструкцию модели и проверяем длину всех ещё не выполненных запросов
+# проверяем длину всех ещё не выполненных запросов до обращения к модели
 def prepare_queries(
-    cases: Sequence[EvaluationQuery], tokenizer: TextTokenizer, raw_query: bool = False,
+    cases: Sequence[EvaluationQuery], tokenizer: TextTokenizer,
     profile: ModelProfile = DEFAULT_PROFILE,
 ) -> list[tuple[EvaluationQuery, str]]:
     prepared: list[tuple[EvaluationQuery, str]] = []
     for case in cases:
-        text = build_query(case.query, raw_query, profile)
+        text = build_query(case.query)
         if tokenizer.count(text) > profile.query_max_tokens:
-            raise ValueError(f'{case.query_id}: запрос вместе с инструкцией превышает {profile.query_max_tokens} токенов')
+            raise ValueError(f'{case.query_id}: запрос превышает {profile.query_max_tokens} токенов')
         prepared.append((case, text))
     return prepared
 
@@ -340,7 +340,6 @@ class CliArgs(argparse.Namespace):
     embedding_model: str
     max_tokens: int
     overlap_tokens: int
-    raw_query: bool
     dry_run: bool
     min_score: float | None
 
@@ -363,7 +362,6 @@ def main() -> int:
     parser.add_argument('--tokenizer-file', type=Path)
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
-    parser.add_argument('--raw-query', action='store_true')
     parser.add_argument('--dry-run', action='store_true', help='проверить csv без qdrant, mws и записи отчёта')
     args: CliArgs = parser.parse_args(namespace=CliArgs())
     if args.top_k < 1 or (args.limit is not None and args.limit < 1):
@@ -403,12 +401,12 @@ def main() -> int:
             validate_expected_articles(store, name, cases)
             point_count = store.count(name, exact=True).count
             revision = index_revision(store, name)
-            context = ReportContext(name, point_count, fingerprint, args.raw_query, args.top_k,
+            context = ReportContext(name, point_count, fingerprint, False, args.top_k,
                                     revision, args.min_score)
             saved = load_report(args.resume, cases, context) if args.resume is not None else {}
             # оставляем для модели только запросы без готового результата
             pending = [case for case in cases if case.query_id not in saved]
-            prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file, profile), args.raw_query, profile) if pending else []
+            prepared = prepare_queries(pending, load_tokenizer(args.tokenizer_file, profile), profile) if pending else []
             print(f'из отчёта: {len(saved)}; осталось запросов: {len(pending)}')
             backend: EmbeddingsClient | None = None
             embedding_config: EmbeddingConfig | None = None

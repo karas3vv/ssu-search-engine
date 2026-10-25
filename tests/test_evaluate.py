@@ -208,12 +208,11 @@ class EvaluationTests(unittest.TestCase):
                 with self.subTest(rows=rows), self.assertRaises(ValueError):
                     load_queries(path)
 
-    # инструкция добавляется в нужном режиме, а слишком длинный запрос отклоняется заранее
-    def test_preflight_rejects_long_queries_and_checks_raw_prompt(self) -> None:
+    # передаём обычный текст и заранее отклоняем слишком длинный запрос
+    def test_preflight_preserves_plain_text_and_rejects_long_queries(self) -> None:
         case = EvaluationQuery('short', 'exact', 'запрос', (1,))
         prepared = prepare_queries([case], CharacterTokenizer())
         self.assertEqual(prepared[0][1], build_query(case.query))
-        self.assertEqual(prepare_queries([case], CharacterTokenizer(), True)[0][1], case.query)
         long = EvaluationQuery('long', 'exact', 'я' * 1100, (1,))
         with self.assertRaisesRegex(ValueError, 'long'):
             prepare_queries([case, long], CharacterTokenizer())

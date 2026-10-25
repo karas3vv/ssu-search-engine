@@ -8,9 +8,8 @@ from unittest.mock import patch
 
 from qdrant_client import QdrantClient, models
 
-from habr_search.model_profiles import GEMMA
 from habr_search.ingestion.index import ensure_collection
-from habr_search.retrieval.search import QUERY_INSTRUCTION, build_query, main, search_articles, validate_collection
+from habr_search.retrieval.search import build_query, main, search_articles, validate_collection
 
 
 # создаём точку с заранее заданным вектором и метаданными статьи
@@ -48,11 +47,9 @@ class SearchTests(unittest.TestCase):
                   redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
                 main()
 
-    # проверяем поисковую инструкцию модели и режим уже подготовленного сервером запроса
-    def test_query_instruction_and_raw_mode(self) -> None:
+    # убираем крайние пробелы и отклоняем пустой запрос
+    def test_plain_query_and_empty_input(self) -> None:
         self.assertEqual(build_query('  запрос  '), 'запрос')
-        self.assertEqual(build_query('запрос', profile=GEMMA), f'<instruct>{QUERY_INSTRUCTION}\n<query>запрос')
-        self.assertEqual(build_query(' запрос ', raw=True), 'запрос')
         with self.assertRaises(ValueError):
             build_query(' \n ')
 

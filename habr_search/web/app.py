@@ -34,7 +34,7 @@ from habr_search.index_version import index_revision
 from habr_search.paths import DATA_DIR
 from habr_search.retrieval.hybrid import HybridConfig, HybridRetriever
 from habr_search.retrieval.tantivy_index import literal_query
-from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE, ModelProfile, deployment_name, get_profile
+from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE, ModelProfile, deployment_name
 
 STATIC_DIR: Path = Path(__file__).resolve().parent / 'static'
 
@@ -109,7 +109,7 @@ class SearchService:
     # проверяем совместимость индекса и словаря до обработки пользовательских запросов
     def __init__(self, store: QdrantClient, name: str, tokenizer: TextTokenizer,
                  embeddings: EmbeddingProvider, dictionary: SpellingDictionary | None,
-                 raw_query: bool = False, min_score: float | None = None,
+                 min_score: float | None = None,
                  profile: ModelProfile = DEFAULT_PROFILE) -> None:
         validate_min_score(min_score)
         validate_collection(store, name, profile.vector_size)
@@ -127,7 +127,6 @@ class SearchService:
         self.tokenizer: TextTokenizer = tokenizer
         self.embeddings: EmbeddingProvider = embeddings
         self.dictionary: SpellingDictionary | None = dictionary
-        self.raw_query: bool = raw_query
         self.min_score: float | None = min_score
         self.lock: Lock = Lock()
         self.status: HealthResponse = HealthResponse(
@@ -143,7 +142,7 @@ class SearchService:
 
     # проверяем фразу и возвращаем варианты из уже загруженного словаря
     def suggest(self, query: str) -> SuggestionResponse:
-        build_query(query, profile=self.profile)
+        build_query(query)
         if self.dictionary is not None:
             try:
                 self.dictionary.validate_context(self.name, self.store.count(self.name, exact=True).count,
@@ -203,9 +202,9 @@ class SearchService:
             start = perf_counter()
             validate_collection(self.store, self.name, self.profile.vector_size)
             query, alternatives, suggested_query, deferred = self._prepare_spelling(request.query.strip(), request.correct_typos)
-            prepared = build_query(query, self.raw_query, self.profile)
+            prepared = build_query(query)
             if self.tokenizer.count(prepared) > self.profile.query_max_tokens:
-                raise ValueError(f'запрос вместе с инструкцией превышает {self.profile.query_max_tokens} токенов')
+                raise ValueError(f'запрос превышает {self.profile.query_max_tokens} токенов')
             # только этот вызов обращается к модели; повторов и фоновых поисков нет
             vector = self.embeddings.embed([prepared])[0]
             results = self._retrieve(query, vector, request.top_k)
@@ -309,7 +308,6 @@ class WebConfig:
     tokenizer_file: Path | None = None
     dictionary_file: Path | None = DEFAULT_DICTIONARY
     chunking: ChunkingConfig = ChunkingConfig()
-    raw_query: bool = False
     min_score: float | None = None  # выбранный порог задаёт сервер, а не браузер
     profile: ModelProfile = DEFAULT_PROFILE
 
@@ -325,7 +323,7 @@ def connect_service(config: WebConfig) -> SearchService:
         dictionary = load_dictionary(config.dictionary_file) if config.dictionary_file is not None else None
         embeddings = EmbeddingsClient(config.embeddings)
         resources.callback(embeddings.close)
-        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.raw_query, config.min_score, config.profile)
+        service = SearchService(store, name, tokenizer, embeddings, dictionary, config.min_score, config.profile)
         service.resources = resources.pop_all()
         return service
 
@@ -429,7 +427,6 @@ class CliArgs(argparse.Namespace):
     without_spelling: bool
     port: int
     timeout: float
-    raw_query: bool
     max_tokens: int
     overlap_tokens: int
     min_score: float | None
@@ -442,7 +439,7 @@ class CliArgs(argparse.Namespace):
 # читаем настройки и ключ в терминале, затем запускаем приложение на локальном адресе
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['bge-m3', 'tantivy', 'hybrid', 'gemma'], default='bge-m3')
+    parser.add_argument('--engine', choices=['bge-m3', 'tantivy', 'hybrid'], default='bge-m3')
     parser.add_argument('--tantivy-path', type=Path, default=DATA_DIR / 'tantivy')
     location = parser.add_mutually_exclusive_group()
     location.add_argument('--qdrant-url')
@@ -452,7 +449,6 @@ def main() -> int:
     parser.add_argument('--without-spelling', action='store_true')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--timeout', type=float, default=300)
-    parser.add_argument('--raw-query', action='store_true')
     parser.add_argument('--max-tokens', type=int, default=1024)
     parser.add_argument('--overlap-tokens', type=int, default=128)
     parser.add_argument('--candidate-limit', type=int, default=20, help='кандидатов каждого источника в гибриде')
@@ -465,30 +461,30 @@ def main() -> int:
         parser.error('нужны допустимый port и положительный конечный timeout')
     try:
         if args.engine == 'tantivy':
-            if args.min_score is not None or args.raw_query or args.qdrant_url or args.qdrant_path:
-                raise ValueError('параметры qdrant, raw-query и min-score относятся к семантическому режиму')
+            if args.min_score is not None or args.qdrant_url or args.qdrant_path:
+                raise ValueError('параметры qdrant и min-score относятся к семантическому режиму')
             # ключ, токенизатор, docker и api модели для этого режима не нужны
             print(f'страница поиска: http://127.0.0.1:{args.port}')
             uvicorn.run(create_app(lambda: TantivyService(args.tantivy_path, not args.without_spelling)),
                         host='127.0.0.1', port=args.port, log_level='warning', access_log=False)
             return 0
         hybrid_config = HybridConfig(args.candidate_limit, args.rrf_k, args.dense_weight, args.lexical_weight)
-        if args.engine == 'hybrid' and (args.min_score is not None or args.raw_query or args.spelling_db is not None):
-            raise ValueError('гибрид не использует min-score, raw-query и spelling-db; словарь берётся из tantivy')
+        if args.engine == 'hybrid' and (args.min_score is not None or args.spelling_db is not None):
+            raise ValueError('гибрид не использует min-score и spelling-db; словарь берётся из tantivy')
         if args.engine == 'hybrid' and args.candidate_limit < 20:
             raise ValueError('для веб-выдачи до 20 статей candidate-limit должен быть не меньше 20')
         validate_min_score(args.min_score)
         store = resolve_qdrant_config(args.qdrant_url, args.qdrant_path)
         if store.path is not None and not store.path.is_dir():
             raise ValueError('локальный qdrant не найден; укажите --qdrant-url')
-        profile = get_profile('bge-m3' if args.engine in ('bge-m3', 'hybrid') else 'gemma2')
+        profile = BGE_M3
         chunking = ChunkingConfig(args.max_tokens, args.overlap_tokens)
         key = read_api_key()
         embeddings = EmbeddingConfig(key, os.environ.get('MWS_EMBEDDINGS_URL', DEFAULT_URL),
                                      deployment_name(profile), args.timeout)
         config = WebConfig(store, embeddings, args.tokenizer_file,
                            None if args.without_spelling else (args.spelling_db or profile.dictionary_file),
-                           chunking, args.raw_query, args.min_score, profile)
+                           chunking, args.min_score, profile)
         print(f'страница поиска: http://127.0.0.1:{args.port}')
         print('получение выдачи обращается к mws; открытие страницы и проверка опечаток — нет')
         factory: Callable[[], SearchBackend]

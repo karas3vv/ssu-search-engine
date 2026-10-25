@@ -21,7 +21,7 @@ from habr_search.embeddings import DEFAULT_URL, EmbeddingConfig, main as probe_m
 from habr_search.evaluation.evaluate import EvaluationQuery, main as evaluate_main, prepare_queries
 from habr_search.ingestion.chunking import ChunkingConfig, ModelTokenizer, chunk_article
 from habr_search.ingestion.index import collection_name, ensure_collection, index_chunks, main as index_main
-from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE, GEMMA
+from habr_search.model_profiles import BGE_M3, DEFAULT_PROFILE
 from habr_search.retrieval.search import build_query, main as search_main, validate_collection
 from habr_search.retrieval.spellcheck import main as spellcheck_main
 from habr_search.web.app import SearchService, create_app, main as web_main
@@ -36,18 +36,11 @@ class ModelProfileTests(unittest.TestCase):
         self.assertEqual(collection_name(DEFAULT_URL, 'bge-m3', ChunkingConfig()), 'habr_bge_m3_4e2f56730009')
         self.assertEqual(build_query('  документы  '), 'документы')
 
-    def test_gemma_collection_and_chunk_ids_are_preserved(self) -> None:
-        self.assertEqual(collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), GEMMA), 'habr_gemma2_ddb30cefb72f')
-        self.assertTrue(collection_name(DEFAULT_URL, 'bge-m3', ChunkingConfig(), BGE_M3).startswith('habr_bge_m3_'))
-        # один и тот же деплоймент также не позволяет смешать разные модели
-        self.assertNotEqual(collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), BGE_M3),
-                            collection_name(DEFAULT_URL, 'parser', ChunkingConfig(), GEMMA))
+    # проверяем прежний идентификатор, чтобы очистка кода не требовала индексации
+    def test_existing_m3_chunk_id_is_preserved(self) -> None:
         doc = article('полный текст статьи')
-        legacy = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
-        explicit = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
-        changed = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), BGE_M3))
-        self.assertEqual(legacy, explicit)
-        self.assertNotEqual(legacy[0].id, changed[0].id)
+        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
+        self.assertEqual([chunk.id for chunk in chunks], ['6a3b1b14-d15b-5e57-8667-4c16e82da0ef'])
 
     def test_m3_tokenizer_uses_its_own_special_tokens(self) -> None:
         with TemporaryDirectory() as folder:
@@ -57,16 +50,12 @@ class ModelProfileTests(unittest.TestCase):
             actual = ModelTokenizer(path, BGE_M3)
             self.assertEqual(actual.tokenizer.encode('текст').ids, [0, 4, 2])
             self.assertEqual(actual.count('текст'), 3)
-            with self.assertRaises(ValueError):
-                ModelTokenizer(path, GEMMA)
-        self.assertNotEqual(GEMMA.tokenizer_file, BGE_M3.tokenizer_file)
 
-    def test_m3_query_and_evaluation_have_no_gemma_instruction(self) -> None:
-        self.assertEqual(build_query('  документы  ', profile=BGE_M3), 'документы')
+    def test_m3_query_and_evaluation_use_plain_text(self) -> None:
+        self.assertEqual(build_query('  документы  '), 'документы')
         case = EvaluationQuery('m3', 'exact', 'документы', (1,))
         self.assertEqual(prepare_queries([case], CharacterTokenizer(), profile=BGE_M3)[0][1], 'документы')
         self.assertEqual(build_query('документы'), 'документы')
-        self.assertIn('<instruct>', build_query('документы', profile=GEMMA))
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(EmbeddingConfig.from_env('test', BGE_M3).model, 'bge-m3')
 
@@ -87,7 +76,7 @@ class ModelProfileTests(unittest.TestCase):
             if payload is not None:
                 self.assertEqual(payload['model'], 'BAAI/bge-m3')
             with self.assertRaises(ValueError):
-                validate_collection(store, 'm3', GEMMA.vector_size)
+                validate_collection(store, 'm3', 3)
             service = SearchService(store, 'm3', CharacterTokenizer(), embeddings, None, profile=BGE_M3)
             with TestClient(create_app(lambda: service)) as client:
                 result = client.post('/api/search', json={'query': 'документы'})
@@ -101,7 +90,7 @@ class ModelProfileTests(unittest.TestCase):
         with closing(QdrantClient(':memory:')) as store:
             ensure_collection(store, 'm3', BGE_M3.vector_size)
             with self.assertRaisesRegex(ValueError, '1024'):
-                index_chunks(chunks, doc.text_hash, store, 'm3', FakeEmbeddings(GEMMA.vector_size), profile=BGE_M3)
+                index_chunks(chunks, doc.text_hash, store, 'm3', FakeEmbeddings(3), profile=BGE_M3)
             self.assertEqual(store.count('m3').count, 0)
 
     def test_all_m3_commands_use_the_same_collection(self) -> None:

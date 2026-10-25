@@ -11,7 +11,6 @@ from tokenizers.models import WordLevel
 
 from habr_search.ingestion.chunking import ChunkingConfig, ModelTokenizer, chunk_article
 from habr_search.ingestion.prepare import PreparedArticle
-from habr_search.model_profiles import GEMMA
 
 
 # вместо модели используем прозрачный счётчик: один символ равен одному токену
@@ -93,24 +92,24 @@ class ChunkingTests(unittest.TestCase):
         chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(128, 0)))
         self.assertEqual(''.join(chunk.text for chunk in chunks), doc.text)
 
-    # для gemma используется её текущий лимит и отсутствует префикс старой модели e5
-    def test_gemma_chunks_can_exceed_old_e5_limit(self) -> None:
+    # фрагменты используют лимит bge-m3 без служебного префикса
+    def test_chunks_fit_m3_limit_without_prefix(self) -> None:
         doc = article('длинный текст ' * 200)
-        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig(), GEMMA))
+        chunks = list(chunk_article(doc, CharacterTokenizer(), ChunkingConfig()))
         self.assertTrue(any(chunk.token_count > 512 for chunk in chunks))
         self.assertTrue(all(chunk.token_count <= 1024 for chunk in chunks))
         self.assertTrue(all(not chunk.embedding_text.startswith('passage: ') for chunk in chunks))
 
-    # при подсчёте длины учитываются оба специальных токена gemma
+    # при подсчёте длины учитываются оба специальных токена bge-m3
     def test_tokenizer_counts_bos_and_eos(self) -> None:
         with TemporaryDirectory() as folder:
             path = Path(folder) / 'tokenizer.json'
             tokenizer = Tokenizer(WordLevel(
-                {'<unk>': 0, '<eos>': 1, '<bos>': 2, 'текст': 3}, unk_token='<unk>',
+                {'<s>': 0, '<pad>': 1, '</s>': 2, '<unk>': 3, 'текст': 4}, unk_token='<unk>',
             ))
             tokenizer.save(str(path))
-            actual = ModelTokenizer(path, GEMMA)
-            self.assertEqual(actual.tokenizer.encode('текст').ids, [2, 3, 1])
+            actual = ModelTokenizer(path)
+            self.assertEqual(actual.tokenizer.encode('текст').ids, [0, 4, 2])
             self.assertEqual(actual.count('текст'), 3)
 
     # файл от другой модели отклоняется до обработки корпуса
