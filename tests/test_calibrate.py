@@ -87,6 +87,53 @@ class CalibrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'отсечённые'):
                 calibrate(queries, report, root / 'other.csv')
 
+    def test_fine_grid_finds_narrow_candidate_without_rounding_to_wrong_value(self) -> None:
+        """маленький разрыв оценок виден на мелкой сетке, но не означает надёжность правила."""
+        items = results(0.5080922, 0.5073422)
+        _, coarse = compare_thresholds(items, 5)
+        rows, fine = compare_thresholds(items, 5, threshold_step=0.001)
+        self.assertIsNone(coarse.min_score)
+        self.assertEqual(len(rows), 2002)
+        self.assertEqual(fine.min_score, 0.508)
+        self.assertEqual(fine.summary.hits, 1)
+        self.assertEqual(fine.summary.abstentions, 1)
+        self.assertEqual(fine.positive_empty, 0)
+        for step in [0, -0.1, 0.00001, 2, float('nan'), float('inf')]:
+            with self.assertRaises(ValueError):
+                compare_thresholds(items, 5, threshold_step=step)
+
+    def test_step_and_details_show_false_abstentions_without_changing_source(self) -> None:
+        """csv показывает потери полезных ответов, а отдельный разбор сохраняет связь с запросами."""
+        items = results(0.5080922, 0.5073422)
+        cases = [item.case for item in items]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            queries, report, output, details = [root / name for name in ('queries.csv', 'report.csv', 'grid.csv', 'details.csv')]
+            write_queries(queries, [[case.query_id, case.category, case.query,
+                                    ';'.join(map(str, case.relevant_ids))] for case in cases])
+            context = ReportContext('bge-m3-test', 2, query_set_hash(cases), False, 5)
+            with report.open('w', encoding='utf-8', newline='') as stream:
+                writer = csv.writer(stream)
+                writer.writerow(REPORT_COLUMNS)
+                for item in items:
+                    writer.writerow(report_row(ReportEntry('2026-10-25T00:00:00+00:00', item), context))
+            original = report.read_bytes()
+            chosen = calibrate(queries, report, output, threshold_step=0.001, details=details)
+            self.assertEqual(chosen.min_score, 0.508)
+            self.assertEqual(original, report.read_bytes())
+            with output.open() as stream:
+                grid = list(csv.DictReader(stream))
+            row = next(row for row in grid if row['min_score'] == '0.51')
+            self.assertEqual(row['positive_empty_results'], '1')
+            self.assertEqual(row['lost_hits'], '1')
+            with details.open() as stream:
+                checked = list(csv.DictReader(stream))
+            self.assertEqual(checked[0]['after_rank'], '1')
+            self.assertEqual(checked[1]['after_empty'], 'True')
+            with self.assertRaises(ValueError):
+                calibrate(queries, report, root / 'new.csv', details=details)
+            self.assertFalse((root / 'new.csv').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
