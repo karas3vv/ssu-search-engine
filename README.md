@@ -40,9 +40,6 @@ python -m habr_search.retrieval.search --query "Как создавать отч
 
 # экспериментальное объединение tantivy и bge-m3
 ./run.sh --engine hybrid
-
-# прежняя модель, только для явного сравнения
-./run.sh --engine gemma
 ```
 
 BGE-M3 выбрана основной по результатам отложенной проверки: у неё и гибрида Hit@5 88,89%, но BGE-M3 показала MRR@5 0,8542 против 0,8148 и медиану 112 мс против 200 мс. Это небольшой контрольный набор, не оценка всего Хабра.
@@ -57,7 +54,7 @@ habr_search/
   retrieval/       # поиск, tantivy, гибрид и опечаточник
   evaluation/      # метрики и сравнение сохранённых отчётов
   web/             # сервер и страница в static/
-  model_profiles.py # параметры bge-m3 и gemma
+  model_profiles.py # параметры bge-m3
   embeddings.py    # клиент MWS
   vector_store.py  # подключение к Qdrant
 tests/             # автономные проверки

@@ -12,7 +12,7 @@
 python -m habr_search.evaluation.evaluate_spelling local --output-dir data/evaluation/spelling-baseline
 ```
 
-Команда не использует MWS, токенизатор или Qdrant. Читается существующий словарь `data/spelling.sqlite3`; иной путь задаётся через `--dictionary`. Новая папка содержит:
+Команда не использует MWS, токенизатор или Qdrant. Читается существующий словарь `data/spelling-bge-m3.sqlite3`; иной путь задаётся через `--dictionary`. Новая папка содержит:
 
 - `local.csv` — ожидаемое и фактическое исправление, признак полного совпадения и изменения, отпечатки словаря, правил и набора, имя коллекции и число точек;
 - `original.csv` — исходные запросы в формате `habr_search/evaluation/evaluate.py`;
